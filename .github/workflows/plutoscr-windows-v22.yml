@@ -1,0 +1,72 @@
+name: PlutoSCR v22 GameData RoundTrip
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - PlutoSCR_GitHub_Overlay_v22.zip
+      - .github/workflows/plutoscr-windows-v22.yml
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive PlutoSCR_GitHub_Overlay_v22.zip overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+
+      - name: Build x64 and round-trip test
+        shell: pwsh
+        run: |
+          cmake -S src -B build-x64 -A x64 -DSTARCRAFT_API_BUILD_TOOLS=ON
+          cmake --build build-x64 --config Release --parallel
+          $p=Get-ChildItem build-x64 -Recurse -Filter plutoscr-gamedata-roundtrip.exe | Select-Object -First 1
+          if(-not $p){throw "roundtrip executable missing"}
+          & $p.FullName | Tee-Object roundtrip-x64.txt
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          if(-not (Select-String roundtrip-x64.txt -Pattern "PLUTOSCR_GAMEDATA_ROUNDTRIP=PASS")){throw "roundtrip failed"}
+
+      - name: Retarget and build x86 PlutoHost
+        shell: pwsh
+        run: |
+          $projects=@("src\bwapi\BWAPIClient\BWAPIClient.vcxproj","src\bwapi\BWAPILIB\BWAPILIB.vcxproj","src\plutoscr_host\PlutoHost.vcxproj")
+          foreach($p in $projects){
+            $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_host\PlutoHost.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m 2>&1 | Tee-Object host-x86.log
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+      - name: Verify transport chain
+        shell: pwsh
+        run: |
+          if(-not (Select-String roundtrip-x64.txt -Pattern "frame=4242.*state_xy=111,222.*command=Move.*command_xy=333,444")){throw "state/command evidence missing"}
+          $h=Get-ChildItem src\plutoscr_host -Recurse -Filter PlutoHost.exe -File | Select-Object -First 1
+          if(-not $h){throw "PlutoHost.exe missing"}
+          Write-Host "PLUTOSCR_TRANSPORT_CHAIN=PASS"
+          Write-Host "PlutoHost bytes=$($h.Length)"
+
+      - name: Collect
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force result | Out-Null
+          Copy-Item roundtrip-x64.txt,host-x86.log result -ErrorAction SilentlyContinue
+          Get-ChildItem src\plutoscr_host -Recurse -Filter PlutoHost.exe -File -ErrorAction SilentlyContinue | % {Copy-Item $_.FullName result -Force}
+          Get-ChildItem build-x64 -Recurse -File -Include starcraft-api-resident.dll,plutoscr-bridge-pump.exe,plutoscr-gamedata-roundtrip.exe -ErrorAction SilentlyContinue | % {Copy-Item $_.FullName result -Force}
+          Get-ChildItem result | Format-Table Name,Length
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v22-GameData-RoundTrip
+          path: result
