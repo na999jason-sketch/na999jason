@@ -1,0 +1,81 @@
+name: PlutoSCR v16 Build
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - PlutoSCR_GitHub_Overlay_v16.zip
+      - .github/workflows/plutoscr-windows-v16.yml
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive PlutoSCR_GitHub_Overlay_v16.zip overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+          if (!(Test-Path "src\bwapi\include\svnrev.h")) { throw "bwapi/include/svnrev.h missing" }
+          Write-Host "SVNREV_INCLUDE_READY=PASS"
+          Get-Content "src\bwapi\include\svnrev.h"
+          if (-not (Select-String -Path "src\bwapi\include\svnrev.h" -Pattern "BUILD_DEBUG")) { throw "BUILD_DEBUG missing" }
+          Write-Host "SVNREV_BUILD_DEBUG_READY=PASS"
+
+      - name: Build x64 runtime
+        shell: pwsh
+        run: |
+          cmake -S src -B build-x64 -A x64 -DSTARCRAFT_API_BUILD_TOOLS=ON
+          cmake --build build-x64 --config Release --parallel
+
+      - name: Retarget legacy BWAPI Win32
+        shell: pwsh
+        run: |
+          $projects=@(
+            "src\bwapi\BWAPIClient\BWAPIClient.vcxproj",
+            "src\bwapi\BWAPILIB\BWAPILIB.vcxproj",
+            "src\plutoscr_host\PlutoHost.vcxproj"
+          )
+          foreach($p in $projects){
+            $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+
+      - name: Build x86 PlutoHost
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_host\PlutoHost.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m 2>&1 | Tee-Object host-x86.log
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+      - name: Collect
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force result | Out-Null
+          Get-ChildItem build-x64 -Recurse -File -Include *.exe,*.dll -ErrorAction SilentlyContinue | % { Copy-Item $_.FullName result -Force }
+          Get-ChildItem src\plutoscr_host -Recurse -File -Filter PlutoHost.exe -ErrorAction SilentlyContinue | % { Copy-Item $_.FullName result -Force }
+          if(Test-Path host-x86.log){Copy-Item host-x86.log result}
+          Get-ChildItem result | Format-Table Name,Length
+
+      - name: Verify PlutoHost
+        if: always()
+        shell: pwsh
+        run: |
+          $h=Get-ChildItem result -Filter PlutoHost.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if(-not $h){ throw "PlutoHost.exe was not produced" }
+          Write-Host "PLUTOHOST_X86_BUILD=PASS"
+          Write-Host "PlutoHost bytes=$($h.Length)"
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v16-Windows
+          path: result
