@@ -1,0 +1,81 @@
+name: PlutoSCR v19 Frame Handshake
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - PlutoSCR_GitHub_Overlay_v19.zip
+      - .github/workflows/plutoscr-windows-v19.yml
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive PlutoSCR_GitHub_Overlay_v19.zip overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+
+      - name: Build and test x64 handshake
+        shell: pwsh
+        run: |
+          cmake -S src -B build-x64 -A x64 -DSTARCRAFT_API_BUILD_TOOLS=ON
+          cmake --build build-x64 --config Release --target plutoscr-frame-handshake-test
+          $p=Get-ChildItem build-x64 -Recurse -Filter plutoscr-frame-handshake-test.exe | Select-Object -First 1
+          if(-not $p){throw "x64 handshake test missing"}
+          & $p.FullName | Tee-Object handshake-x64.txt
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          if(-not (Select-String handshake-x64.txt -Pattern "PLUTOSCR_FRAME_HANDSHAKE=PASS")){throw "x64 handshake failed"}
+
+      - name: Retarget and build x86 PlutoHost
+        shell: pwsh
+        run: |
+          $projects=@(
+            "src\bwapi\BWAPIClient\BWAPIClient.vcxproj",
+            "src\bwapi\BWAPILIB\BWAPILIB.vcxproj",
+            "src\plutoscr_host\PlutoHost.vcxproj"
+          )
+          foreach($p in $projects){
+            $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_host\PlutoHost.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+      - name: Build and test x86 handshake
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $cl=Join-Path $vs "VC\Tools\MSVC"
+          $ver=(Get-ChildItem $cl -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          $vcvars=Join-Path $vs "VC\Auxiliary\Build\vcvars32.bat"
+          cmd /c "`"$vcvars`" && cl /nologo /EHsc /std:c++17 /O2 /I src\plutoscr_bridge src\plutoscr_bridge\FrameHandshake.cpp src\plutoscr_bridge\FrameHandshakeTest.cpp /Fe:handshake-x86.exe"
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          .\handshake-x86.exe | Tee-Object handshake-x86.txt
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          if(-not (Select-String handshake-x86.txt -Pattern "PLUTOSCR_FRAME_HANDSHAKE=PASS")){throw "x86 handshake failed"}
+
+      - name: Collect
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force result | Out-Null
+          Copy-Item handshake-x64.txt,handshake-x86.txt result -ErrorAction SilentlyContinue
+          Get-ChildItem src\plutoscr_host -Recurse -Filter PlutoHost.exe -File -ErrorAction SilentlyContinue | % {Copy-Item $_.FullName result -Force}
+          Get-ChildItem result | Format-Table Name,Length
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v19-Handshake
+          path: result
