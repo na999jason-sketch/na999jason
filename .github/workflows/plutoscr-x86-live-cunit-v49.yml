@@ -1,0 +1,118 @@
+name: PlutoSCR v49 x86 Live CUnit Original Pluto Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive -Path "PlutoSCR_X86LiveCUnit_v49.zip" -DestinationPath "overlay_v49" -Force
+          Copy-Item -Path "overlay_v49\*" -Destination "src" -Recurse -Force
+
+          $bwapiLibProject = "src\bwapi\BWAPILIB\BWAPILIB.vcxproj"
+          $bx = Get-Content $bwapiLibProject -Raw
+          $bx = $bx -replace '<AdditionalIncludeDirectories>', '<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;'
+          Set-Content $bwapiLibProject $bx -Encoding UTF8
+
+          Get-ChildItem "src" -Recurse -Filter *.vcxproj | ForEach-Object {
+            $p=$_.FullName
+            $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+
+      - name: Build x86 BWAPI resident and injector
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found" }
+          $vs=& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if (-not $vs) { throw "Visual Studio with MSBuild not found" }
+          $msbuild=Get-ChildItem "$vs\MSBuild" -Recurse -Filter MSBuild.exe |
+            Where-Object { $_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\' } |
+            Select-Object -First 1
+          $vcvars=Get-ChildItem "$vs\VC\Auxiliary\Build" -Filter vcvars32.bat | Select-Object -First 1
+          if (-not $msbuild) { throw "MSBuild.exe not found" }
+          if (-not $vcvars) { throw "vcvars32.bat not found" }
+
+          Write-Host "VS=$vs"
+          Write-Host "MSBUILD=$($msbuild.FullName)"
+          Write-Host "VCVARS32=$($vcvars.FullName)"
+
+          $cmd=@"
+          call "$($vcvars.FullName)"
+          "$($msbuild.FullName)" src\plutoscr_x86\PlutoSCRX86V49.vcxproj /m /p:Configuration=Release /p:Platform=Win32 /fl /flp:logfile=msbuild-v49.log;verbosity=diagnostic
+          if errorlevel 1 exit /b 1
+          cl /nologo /EHsc /O2 /DWIN32 /D_WINDOWS src\PlutoSCRX86Inject.cpp /Fe:PlutoSCRX86Inject.exe /link kernel32.lib
+          if errorlevel 1 exit /b 1
+          "@
+          cmd.exe /D /S /C $cmd
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path msbuild-v49.log) { Get-Content msbuild-v49.log -Tail 800 }
+            throw "v49 build failed: $LASTEXITCODE"
+          }
+
+          Write-Host "=== GENERATED DLL/EXE FILES ==="
+          Get-ChildItem . -Recurse -File -Include *.dll,*.exe |
+            Sort-Object FullName |
+            ForEach-Object { Write-Host ("OUTPUT {0} {1}" -f $_.Length,$_.FullName) }
+
+      - name: Assemble and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference="Stop"
+          New-Item -ItemType Directory artifact_v49 -Force | Out-Null
+
+          # Do not assume the project target name. Find the newly-built resident by
+          # project output directory first, then select the largest non-BWAPI DLL.
+          $dlls=Get-ChildItem "src\plutoscr_x86" -Recurse -File -Filter *.dll
+          if (-not $dlls) {
+            Write-Host "=== src/plutoscr_x86 tree ==="
+            Get-ChildItem "src\plutoscr_x86" -Recurse -File | ForEach-Object { Write-Host $_.FullName }
+            throw "No resident DLL generated under src\plutoscr_x86"
+          }
+          $dll=$dlls | Sort-Object Length -Descending | Select-Object -First 1
+          Write-Host "RESIDENT_SOURCE=$($dll.FullName)"
+          Write-Host "RESIDENT_SIZE=$($dll.Length)"
+          Copy-Item $dll.FullName "artifact_v49\PlutoSCRX86V49.dll" -Force
+
+          $inject=Get-ChildItem . -Recurse -File -Filter "PlutoSCRX86Inject.exe" | Select-Object -First 1
+          if (-not $inject) { throw "PlutoSCRX86Inject.exe not found" }
+          Write-Host "INJECTOR_SOURCE=$($inject.FullName)"
+          Write-Host "INJECTOR_SIZE=$($inject.Length)"
+          Copy-Item $inject.FullName "artifact_v49\PlutoSCRX86Inject.exe" -Force
+
+          $extras=@("RUN_PLUTO_SCR_X86_V49.cmd","README_V49.txt")
+          foreach($name in $extras) {
+            $f=Get-ChildItem src -Recurse -File -Filter $name | Select-Object -First 1
+            if($f) { Copy-Item $f.FullName "artifact_v49\$name" -Force }
+          }
+
+          $dllSize=(Get-Item "artifact_v49\PlutoSCRX86V49.dll").Length
+          $exeSize=(Get-Item "artifact_v49\PlutoSCRX86Inject.exe").Length
+          if($dllSize -lt 50000) { throw "Unexpectedly small resident DLL: $dllSize" }
+          if($exeSize -lt 5000) { throw "Unexpectedly small injector: $exeSize" }
+
+          Write-Host "PlutoSCRX86V49.dll=$dllSize bytes"
+          Write-Host "PlutoSCRX86Inject.exe=$exeSize bytes"
+          Write-Host "PLUTOSCR_V49_X86_LIVE_CUNIT_BUILD=PASS"
+          Write-Host "PLUTOSCR_V49_X86_LIVE_CUNIT_PACKAGE=PASS"
+
+      - name: Upload v49
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v49-X86-Live-CUnit
+          path: artifact_v49
+          if-no-files-found: error
