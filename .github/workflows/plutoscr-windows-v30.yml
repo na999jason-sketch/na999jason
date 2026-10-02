@@ -50,9 +50,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force package | Out-Null
 
-          $host=Get-ChildItem src\plutoscr_host -Recurse -Filter PlutoHost.exe -File | Select-Object -First 1
-          if(-not $host){throw "PlutoHost.exe missing"}
-          Copy-Item $host.FullName package\PlutoHost.exe
+          $hostExe=Get-ChildItem src\plutoscr_host -Recurse -Filter PlutoHost.exe -File | Select-Object -First 1
+          if(-not $hostExe){throw "PlutoHost.exe missing"}
+          Copy-Item $hostExe.FullName package\PlutoHost.exe
 
           $resident=Get-ChildItem build64 -Recurse -Filter starcraft-api-resident.dll -File | Select-Object -First 1
           if(-not $resident){throw "starcraft-api-resident.dll missing"}
