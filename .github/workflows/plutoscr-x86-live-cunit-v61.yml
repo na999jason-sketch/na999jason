@@ -1,0 +1,78 @@
+
+          # BWAPI.cpp includes generated svnrev.h; upstream clone does not contain it.
+          $svn='src\bwapi\BWAPILIB\Source\svnrev.h'
+          Set-Content $svn '#pragma once' -Encoding ASCII
+          Add-Content $svn '#define SVN_REV 0' -Encoding ASCII
+          Add-Content $svn '#define BUILD_DEBUG 0' -Encoding ASCII
+          if(!(Test-Path $svn)){throw 'svnrev.h generation failed'}
+          $svntxt=Get-Content $svn -Raw
+          if($svntxt -notmatch '#define SVN_REV 0' -or $svntxt -notmatch '#define BUILD_DEBUG 0'){throw 'svnrev.h validation failed'}
+          Write-Host '=== svnrev.h ==='
+          Get-Content $svn
+
+          if((Get-Content $p -Raw) -notmatch [regex]::Escape('$(ProjectDir)Source;$(ProjectDir)..;')){
+            throw 'MSBuild ProjectDir literal was not preserved'
+          }
+          Write-Host 'PLUTOSCR_V61_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if(!(Test-Path $vw)){throw 'vswhere missing'}
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' |
+            Where-Object {$_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\'} |
+            Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+
+          $libs=Get-ChildItem 'src' -Recurse -File -Filter '*.lib'
+          $client=$libs | Where-Object {$_.Name -ieq 'BWAPIClient.lib'} | Select-Object -First 1
+          $bwapi=$libs | Where-Object {$_.Name -ieq 'BWAPILIB.lib'} | Select-Object -First 1
+          if(!$client -or !$bwapi){
+            $libs | ForEach-Object {Write-Host ("LIB {0} {1}" -f $_.Length,$_.FullName)}
+            throw 'Required BWAPI static libraries not found'
+          }
+          Write-Host "BWAPILIB=$($bwapi.FullName)"
+          Write-Host "BWAPIClient=$($client.FullName)"
+          Write-Host 'PLUTOSCR_V61_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v61 resident
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v61.ps1
+
+      - name: Assemble and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'artifact_v61' -Force | Out-Null
+          Copy-Item 'build_v61\PlutoSCRX86V61.dll' 'artifact_v61\PlutoSCRX86V61.dll'
+          Copy-Item 'build_v61\PlutoSCRX86Inject.exe' 'artifact_v61\PlutoSCRX86Inject.exe'
+
+          foreach($n in @('RUN_PLUTO_SCR_X86_V61.cmd','README_V61.txt')){
+            $f=Get-ChildItem 'src' -Recurse -File -Filter $n | Select-Object -First 1
+            if($f){Copy-Item $f.FullName 'artifact_v61'}
+          }
+
+          $d=(Get-Item 'artifact_v61\PlutoSCRX86V61.dll').Length
+          $e=(Get-Item 'artifact_v61\PlutoSCRX86Inject.exe').Length
+          if($d -lt 50000){throw "DLL too small: $d"}
+          if($e -lt 5000){throw "Injector too small: $e"}
+          Write-Host "PlutoSCRX86V61.dll=$d bytes"
+          Write-Host "PlutoSCRX86Inject.exe=$e bytes"
+          Write-Host 'PLUTOSCR_V61_X86_DIRECT_LINK_BUILD=PASS'
+          Write-Host 'PLUTOSCR_V61_X86_DIRECT_LINK_PACKAGE=PASS'
+
+      - name: Upload v61
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v61-X86-Direct-Link
+          path: artifact_v61
+          if-no-files-found: error
