@@ -1,0 +1,55 @@
+name: PlutoSCR v37 x86 Direct Pluto Loader
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract v37 overlay
+        shell: powershell
+        run: |
+          Expand-Archive -Path "$env:GITHUB_WORKSPACE\PlutoSCR_X86Direct_v37.zip" -DestinationPath "$env:RUNNER_TEMP\v37" -Force
+
+      - name: Build x86 resident and injector
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
+          cd /d "%RUNNER_TEMP%\v37"
+
+          cl /nologo /std:c++17 /O2 /EHsc /LD PlutoSCRX86Resident.cpp /Fe:PlutoSCRX86Resident.dll
+          if errorlevel 1 exit /b 1
+
+          cl /nologo /std:c++17 /O2 /EHsc PlutoSCRX86Inject.cpp /Fe:PlutoSCRX86Inject.exe
+          if errorlevel 1 exit /b 1
+
+          echo PLUTOSCR_V37_X86_DIRECT_BUILD=PASS
+
+      - name: Assemble package
+        shell: powershell
+        run: |
+          $src="$env:RUNNER_TEMP\v37"
+          $out="$env:RUNNER_TEMP\PlutoSCR-v37-X86-Direct"
+
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          Copy-Item `
+            "$src\PlutoSCRX86Resident.dll", `
+            "$src\PlutoSCRX86Inject.exe", `
+            "$src\RUN_PLUTO_SCR_X86.cmd", `
+            "$src\README_V37.txt" `
+            $out
+
+          Get-ChildItem $out | Format-Table Name,Length
+
+          Write-Host "PLUTOSCR_V37_X86_DIRECT_PACKAGE=PASS"
+
+      - name: Upload v37
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v37-X86-Direct
+          path: ${{ runner.temp }}\PlutoSCR-v37-X86-Direct
