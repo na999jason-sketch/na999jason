@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - PlutoSCR_GitHub_Overlay_v9.zip
+      - PlutoSCR_GitHub_Overlay_v10.zip
       - .github/workflows/plutoscr-windows-v8.yml
 
 jobs:
@@ -16,7 +16,7 @@ jobs:
         shell: pwsh
         run: |
           git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
-          Expand-Archive PlutoSCR_GitHub_Overlay_v9.zip overlay -Force
+          Expand-Archive PlutoSCR_GitHub_Overlay_v10.zip overlay -Force
           Copy-Item overlay\* src -Recurse -Force
           cmake --version
 
