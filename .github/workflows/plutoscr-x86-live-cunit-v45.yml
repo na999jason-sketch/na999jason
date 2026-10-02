@@ -1,0 +1,85 @@
+name: PlutoSCR v45 x86 Live CUnit Original Pluto Runner
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive "$env:GITHUB_WORKSPACE\PlutoSCR_X86LiveCUnit_v45.zip" overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+
+          $svnText = @"
+          #pragma once
+          #define SVN_REV 0
+          #define SVN_REV_STR "0"
+          #define SVN_REVISION 0
+          #define BUILD_DEBUG 0
+          "@
+          $svnTargets = @(
+            "src\bwapi\svnrev.h",
+            "src\bwapi\BWAPILIB\Source\svnrev.h"
+          )
+          foreach ($svn in $svnTargets) {
+            $parent = Split-Path $svn -Parent
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+            $svnText | Set-Content $svn -Encoding ASCII
+            if (!(Test-Path -LiteralPath $svn)) { throw "svnrev.h creation failed: $svn" }
+            Write-Host "svnrev.ready=$svn"
+          }
+
+          $bwapiLibProject = "src\bwapi\BWAPILIB\BWAPILIB.vcxproj"
+          $bx = Get-Content $bwapiLibProject -Raw
+          $bx = $bx -replace '<AdditionalIncludeDirectories>', '<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;'
+          Set-Content $bwapiLibProject $bx -Encoding UTF8
+          Write-Host "BWAPILIB explicit svnrev include path injected"
+
+          $projects=@("src\bwapi\BWAPIClient\BWAPIClient.vcxproj","src\bwapi\BWAPILIB\BWAPILIB.vcxproj","src\plutoscr_x86\PlutoSCRX86V45.vcxproj")
+          foreach($p in $projects){
+            $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+
+      - name: Build x86 BWAPI and in-process Pluto resident
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_x86\PlutoSCRX86V45.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+          cmd /c """$vs\VC\Auxiliary\Build\vcvars32.bat"" && cd /d ""$env:GITHUB_WORKSPACE\src"" && cl /nologo /std:c++17 /O2 /EHsc PlutoSCRX86Inject.cpp /Fe:PlutoSCRX86Inject.exe"
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          Write-Host "PLUTOSCR_V45_X86_INPROCESS_ABI_BUILD=PASS"
+
+      - name: Assemble and verify
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          $dll=Get-ChildItem src\plutoscr_x86 -Recurse -Filter PlutoSCRX86V45.dll -File | Select-Object -First 1
+          if(-not $dll){throw "PlutoSCRX86V45.dll missing"}
+          Copy-Item $dll.FullName package\PlutoSCRX86V45.dll
+          Copy-Item src\PlutoSCRX86Inject.exe package\
+          Copy-Item src\RUN_PLUTO_SCR_X86_V45.cmd package\
+          Copy-Item src\README_V45.txt package\
+          foreach($n in @("PlutoSCRX86V45.dll","PlutoSCRX86Inject.exe","RUN_PLUTO_SCR_X86_V45.cmd","README_V45.txt")){
+            if(!(Test-Path "package\$n")){throw "missing package file $n"}
+          }
+          Get-ChildItem package | Format-Table Name,Length
+          Write-Host "PLUTOSCR_V45_X86_INPROCESS_ABI_PACKAGE=PASS"
+
+      - name: Upload v45
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v45-X86-Live-CUnit
+          path: package
+          if-no-files-found: error
