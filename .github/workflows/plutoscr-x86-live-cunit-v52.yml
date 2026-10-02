@@ -1,0 +1,131 @@
+name: PlutoSCR v52 x86 Direct-Link Original Pluto Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive -Path 'PlutoSCR_X86LiveCUnit_v52.zip' -DestinationPath 'overlay_v52' -Force
+          Copy-Item -Path 'overlay_v52\*' -Destination 'src' -Recurse -Force
+
+          Get-ChildItem 'src' -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          # Single-quoted PowerShell literals deliberately preserve the MSBuild $(ProjectDir) token.
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+          if((Get-Content $p -Raw) -notmatch [regex]::Escape('$(ProjectDir)Source;$(ProjectDir)..;')){
+            throw 'MSBuild ProjectDir literal was not preserved'
+          }
+          Write-Host 'PLUTOSCR_V52_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if(!(Test-Path $vw)){throw 'vswhere missing'}
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' |
+            Where-Object {$_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\'} |
+            Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+
+          $libs=Get-ChildItem 'src' -Recurse -File -Filter '*.lib'
+          $client=$libs | Where-Object {$_.Name -ieq 'BWAPIClient.lib'} | Select-Object -First 1
+          $bwapi=$libs | Where-Object {$_.Name -ieq 'BWAPILIB.lib'} | Select-Object -First 1
+          if(!$client -or !$bwapi){
+            $libs | ForEach-Object {Write-Host ("LIB {0} {1}" -f $_.Length,$_.FullName)}
+            throw 'Required BWAPI static libraries not found'
+          }
+          Write-Host "BWAPILIB=$($bwapi.FullName)"
+          Write-Host "BWAPIClient=$($client.FullName)"
+          Write-Host 'PLUTOSCR_V52_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v52 resident
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vw -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if(!$vs){throw 'Visual C++ x86 tools not found'}
+          $vc=Get-ChildItem "$vs\VC\Auxiliary\Build" -Filter 'vcvars32.bat' | Select-Object -First 1
+          if(!$vc){throw 'vcvars32.bat missing'}
+
+          $libs=Get-ChildItem 'src' -Recurse -File -Filter '*.lib'
+          $client=$libs | Where-Object {$_.Name -ieq 'BWAPIClient.lib'} | Select-Object -First 1
+          $bwapi=$libs | Where-Object {$_.Name -ieq 'BWAPILIB.lib'} | Select-Object -First 1
+          if(!$client -or !$bwapi){throw 'BWAPI libraries disappeared before direct link'}
+
+          New-Item -ItemType Directory 'build_v52' -Force | Out-Null
+          $cmd=@"
+          call "$($vc.FullName)"
+          if errorlevel 1 exit /b 1
+          cl /nologo /c /EHsc /O2 /std:c++17 /MD /DWIN32 /DNDEBUG /D_WINDOWS /I"src\bwapi\include" "src\plutoscr_x86\PlutoSCRX86V52.cpp" /Fo"build_v52\PlutoSCRX86V52.obj"
+          if errorlevel 1 exit /b 1
+          link /nologo /DLL /OUT:"build_v52\PlutoSCRX86V52.dll" "build_v52\PlutoSCRX86V52.obj" "$($client.FullName)" "$($bwapi.FullName)" kernel32.lib user32.lib advapi32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /EHsc /O2 /MD /DWIN32 /D_WINDOWS "src\PlutoSCRX86Inject.cpp" /Fe:"build_v52\PlutoSCRX86Inject.exe" /link kernel32.lib
+          if errorlevel 1 exit /b 1
+          "@
+          Set-Content 'build_v52\build-direct.cmd' $cmd -Encoding ASCII
+          cmd.exe /D /C 'build_v52\build-direct.cmd'
+          if($LASTEXITCODE -ne 0){throw "Direct v52 compile/link failed: $LASTEXITCODE"}
+
+          foreach($f in @('build_v52\PlutoSCRX86V52.obj','build_v52\PlutoSCRX86V52.dll','build_v52\PlutoSCRX86Inject.exe')){
+            if(!(Test-Path $f)){throw "Expected direct-build output missing: $f"}
+            $i=Get-Item $f
+            Write-Host ("OUTPUT {0} {1}" -f $i.Length,$i.FullName)
+          }
+          Write-Host 'PLUTOSCR_V52_DIRECT_LINK=PASS'
+
+      - name: Assemble and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'artifact_v52' -Force | Out-Null
+          Copy-Item 'build_v52\PlutoSCRX86V52.dll' 'artifact_v52\PlutoSCRX86V52.dll'
+          Copy-Item 'build_v52\PlutoSCRX86Inject.exe' 'artifact_v52\PlutoSCRX86Inject.exe'
+
+          foreach($n in @('RUN_PLUTO_SCR_X86_V52.cmd','README_V52.txt')){
+            $f=Get-ChildItem 'src' -Recurse -File -Filter $n | Select-Object -First 1
+            if($f){Copy-Item $f.FullName 'artifact_v52'}
+          }
+
+          $d=(Get-Item 'artifact_v52\PlutoSCRX86V52.dll').Length
+          $e=(Get-Item 'artifact_v52\PlutoSCRX86Inject.exe').Length
+          if($d -lt 50000){throw "DLL too small: $d"}
+          if($e -lt 5000){throw "Injector too small: $e"}
+          Write-Host "PlutoSCRX86V52.dll=$d bytes"
+          Write-Host "PlutoSCRX86Inject.exe=$e bytes"
+          Write-Host 'PLUTOSCR_V52_X86_DIRECT_LINK_BUILD=PASS'
+          Write-Host 'PLUTOSCR_V52_X86_DIRECT_LINK_PACKAGE=PASS'
+
+      - name: Upload v52
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v52-X86-Direct-Link
+          path: artifact_v52
+          if-no-files-found: error
