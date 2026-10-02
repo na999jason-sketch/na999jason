@@ -1,0 +1,46 @@
+name: PlutoSCR v11 Build
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - PlutoSCR_GitHub_Overlay_v11.zip
+      - .github/workflows/plutoscr-windows-v11.yml
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive PlutoSCR_GitHub_Overlay_v11.zip overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+      - name: Build x64 runtime
+        shell: pwsh
+        run: |
+          cmake -S src -B build-x64 -A x64 -DSTARCRAFT_API_BUILD_TOOLS=ON
+          cmake --build build-x64 --config Release --parallel
+      - name: Build x86 PlutoHost
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_host\PlutoHost.vcxproj /p:Configuration=Release /p:Platform=Win32 /m
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+      - name: Collect
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force result | Out-Null
+          Get-ChildItem build-x64 -Recurse -File -Include *.exe,*.dll -ErrorAction SilentlyContinue | % { Copy-Item $_.FullName result -Force }
+          Get-ChildItem src\plutoscr_host -Recurse -File -Filter PlutoHost.exe -ErrorAction SilentlyContinue | % { Copy-Item $_.FullName result -Force }
+          Get-ChildItem result | Format-Table Name,Length
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v11-Windows
+          path: result
