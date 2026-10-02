@@ -1,0 +1,66 @@
+name: PlutoSCR v23 Original Pluto ABI
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive PlutoSCR_GitHub_Overlay_v23.zip overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+          Expand-Archive PlutoSCR_OriginalPlutoDLL_v23.zip original-pluto -Force
+          if(-not (Test-Path original-pluto\pluto.dll)){throw "original pluto.dll missing"}
+
+      - name: Retarget BWAPI Win32
+        shell: pwsh
+        run: |
+          $projects=@("src\bwapi\BWAPIClient\BWAPIClient.vcxproj","src\bwapi\BWAPILIB\BWAPILIB.vcxproj","src\plutoscr_host\PlutoHost.vcxproj","src\plutoscr_host\PlutoModuleProbe.vcxproj")
+          foreach($p in $projects){
+            $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+
+      - name: Build x86 PlutoHost and module probe
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_host\PlutoHost.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          & $msbuild src\plutoscr_host\PlutoModuleProbe.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+      - name: Probe original pluto.dll
+        shell: pwsh
+        run: |
+          $p=Get-ChildItem src\plutoscr_host -Recurse -Filter PlutoModuleProbe.exe -File | Select-Object -First 1
+          if(-not $p){throw "PlutoModuleProbe.exe missing"}
+          & $p.FullName (Resolve-Path original-pluto\pluto.dll) | Tee-Object pluto-module-probe.txt
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          foreach($marker in @("PLUTOSCR_PLUTO_LOAD=PASS","PLUTOSCR_PLUTO_EXPORTS=PASS","PLUTOSCR_PLUTO_GAMEINIT=PASS","PLUTOSCR_PLUTO_CREATE_AI=PASS","PLUTOSCR_ORIGINAL_MODULE_ABI=PASS")){
+            if(-not (Select-String pluto-module-probe.txt -SimpleMatch $marker)){throw "missing marker: $marker"}
+          }
+
+      - name: Collect
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force result | Out-Null
+          Copy-Item pluto-module-probe.txt result -ErrorAction SilentlyContinue
+          Get-ChildItem src\plutoscr_host -Recurse -File -Include PlutoHost.exe,PlutoModuleProbe.exe | % {Copy-Item $_.FullName result -Force}
+          Copy-Item original-pluto\pluto.dll result -ErrorAction SilentlyContinue
+          Get-ChildItem result | Format-Table Name,Length
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v23-Original-Pluto-ABI
+          path: result
