@@ -1,0 +1,165 @@
+name: PlutoSCR v29 Real Host Match Callback Integration
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+
+          Expand-Archive PlutoSCR_GitHub_Overlay_v29.zip overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+
+          Expand-Archive PlutoSCR_OriginalPlutoDLL_v29.zip original-pluto -Force
+
+          if(-not (Test-Path original-pluto\pluto.dll)){
+            throw "original pluto.dll missing"
+          }
+
+      - name: Retarget BWAPI Win32
+        shell: pwsh
+        run: |
+          $projects=@(
+            "src\bwapi\BWAPIClient\BWAPIClient.vcxproj",
+            "src\bwapi\BWAPILIB\BWAPILIB.vcxproj",
+            "src\plutoscr_host\PlutoHost.vcxproj"
+          )
+
+          foreach($p in $projects){
+            $x=Get-Content $p -Raw
+
+            $x=$x -replace `
+              '<PlatformToolset>v141_xp</PlatformToolset>', `
+              '<PlatformToolset>v143</PlatformToolset>'
+
+            $x=$x -replace `
+              '<PlatformToolset>v141</PlatformToolset>', `
+              '<PlatformToolset>v143</PlatformToolset>'
+
+            Set-Content $p $x -Encoding UTF8
+          }
+
+      - name: Verify real Host callback path
+        shell: pwsh
+        run: |
+          $t=Get-Content src\plutoscr_host\PlutoHost.cpp -Raw
+
+          $required=@(
+            "BWAPI::GameImpl game(data)",
+            "gameInit(&game)",
+            "BWAPI::AIModule* module = createAI()",
+            "game.onMatchStart()",
+            "game.onMatchFrame()",
+            "dispatchEvent(module, e)",
+            "module->onFrame()",
+            "ctl->consumedFrame",
+            "ctl->commandSequence",
+            "ExitProcess(0)"
+          )
+
+          foreach($m in $required){
+            if(-not $t.Contains($m)){
+              throw "missing Host integration marker: $m"
+            }
+          }
+
+          if($t.Contains("delete module")){
+            throw "unsafe cross-DLL delete still present"
+          }
+
+          if($t.Contains("FreeLibrary(pluto)")){
+            throw "unsafe live-module unload still present"
+          }
+
+          Write-Host "PLUTOSCR_REAL_HOST_MATCH_CALLBACK_PATH=PASS"
+          Write-Host "PLUTOSCR_REAL_HOST_LIFETIME_POLICY=PASS"
+
+      - name: Build x86 real PlutoHost
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          $vs=& $vswhere `
+            -latest `
+            -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+
+          & $msbuild `
+            src\plutoscr_host\PlutoHost.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=Win32 `
+            /p:PlatformToolset=v143 `
+            /m
+
+          if($LASTEXITCODE -ne 0){
+            exit $LASTEXITCODE
+          }
+
+          $h=Get-ChildItem `
+            src\plutoscr_host `
+            -Recurse `
+            -Filter PlutoHost.exe `
+            -File |
+            Select-Object -First 1
+
+          if(-not $h){
+            throw "PlutoHost.exe missing"
+          }
+
+          Write-Host "PLUTOSCR_REAL_HOST_BUILD=PASS"
+          Write-Host "PlutoHost bytes=$($h.Length)"
+
+      - name: Collect
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            result |
+            Out-Null
+
+          $h=Get-ChildItem `
+            src\plutoscr_host `
+            -Recurse `
+            -Filter PlutoHost.exe `
+            -File |
+            Select-Object -First 1
+
+          if($h){
+            Copy-Item `
+              $h.FullName `
+              result\PlutoHost.exe `
+              -Force
+          }
+
+          Copy-Item `
+            original-pluto\pluto.dll `
+            result\pluto.dll `
+            -Force
+
+          Copy-Item `
+            src\plutoscr_host\PlutoHost.cpp `
+            result\PlutoHost.cpp `
+            -Force
+
+          Get-ChildItem result |
+            Format-Table Name,Length
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v29-Real-Host-Match-Callback
+          path: result
