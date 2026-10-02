@@ -1,0 +1,88 @@
+name: PlutoSCR v25 Pluto Crash Checkpoints
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive PlutoSCR_GitHub_Overlay_v25.zip overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+          Expand-Archive PlutoSCR_OriginalPlutoDLL_v25.zip original-pluto -Force
+          if(-not (Test-Path original-pluto\pluto.dll)){throw "original pluto.dll missing"}
+
+      - name: Retarget BWAPI Win32
+        shell: pwsh
+        run: |
+          $projects=@("src\bwapi\BWAPIClient\BWAPIClient.vcxproj","src\bwapi\BWAPILIB\BWAPILIB.vcxproj","src\plutoscr_host\PlutoHost.vcxproj","src\plutoscr_host\PlutoModuleProbe.vcxproj")
+          foreach($p in $projects){
+            $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+
+      - name: Build x86 PlutoHost and probe
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_host\PlutoHost.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          & $msbuild src\plutoscr_host\PlutoModuleProbe.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+      - name: Run original Pluto probe with durable checkpoints
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $p=Get-ChildItem src\plutoscr_host -Recurse -Filter PlutoModuleProbe.exe -File | Select-Object -First 1
+          if(-not $p){throw "PlutoModuleProbe.exe missing"}
+          Remove-Item pluto-module-probe-trace.txt -ErrorAction SilentlyContinue
+          & $p.FullName (Resolve-Path original-pluto\pluto.dll)
+          $code=$LASTEXITCODE
+          "process_exit_code=$code" | Out-File -Append -Encoding ascii pluto-module-probe-trace.txt
+          Write-Host "PLUTOSCR_PROBE_EXIT_CODE=$code"
+          if(Test-Path pluto-module-probe-trace.txt){Get-Content pluto-module-probe-trace.txt}
+
+      - name: Diagnose checkpoint
+        shell: pwsh
+        run: |
+          if(-not (Test-Path pluto-module-probe-trace.txt)){throw "trace file missing"}
+          $t=Get-Content pluto-module-probe-trace.txt -Raw
+          Write-Host $t
+          if($t -match "PLUTOSCR_ORIGINAL_MODULE_ABI=PASS"){
+            Write-Host "PLUTOSCR_ORIGINAL_MODULE_ABI_DIAG=PASS"
+          } elseif($t -match "before_LoadLibrary" -and $t -notmatch "after_LoadLibrary"){
+            Write-Host "PLUTOSCR_CRASH_STAGE=LoadLibrary"
+          } elseif($t -match "after_LoadLibrary" -and $t -notmatch "after_GetProcAddress"){
+            Write-Host "PLUTOSCR_CRASH_STAGE=GetProcAddress"
+          } elseif($t -match "before_gameInit" -and $t -notmatch "after_gameInit"){
+            Write-Host "PLUTOSCR_CRASH_STAGE=gameInit"
+          } elseif($t -match "before_newAIModule" -and $t -notmatch "after_newAIModule"){
+            Write-Host "PLUTOSCR_CRASH_STAGE=newAIModule"
+          } else {
+            Write-Host "PLUTOSCR_CRASH_STAGE=other"
+          }
+
+      - name: Collect
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force result | Out-Null
+          Copy-Item pluto-module-probe-trace.txt result -ErrorAction SilentlyContinue
+          Get-ChildItem src\plutoscr_host -Recurse -File -Include PlutoHost.exe,PlutoModuleProbe.exe | % {Copy-Item $_.FullName result -Force}
+          Copy-Item original-pluto\pluto.dll result -ErrorAction SilentlyContinue
+          Get-ChildItem result | Format-Table Name,Length
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v25-Pluto-Crash-Checkpoints
+          path: result
