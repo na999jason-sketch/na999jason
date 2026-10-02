@@ -1,0 +1,138 @@
+name: PlutoSCR v46 x86 Live CUnit Original Pluto Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+
+          Expand-Archive `
+            -Path "PlutoSCR_X86LiveCUnit_v46.zip" `
+            -DestinationPath "overlay_v46" `
+            -Force
+
+          Copy-Item `
+            -Path "overlay_v46\*" `
+            -Destination "src" `
+            -Recurse `
+            -Force
+
+          # BWAPILIB requires its Source directory on the include path
+          $bwapiLibProject = "src\bwapi\BWAPILIB\BWAPILIB.vcxproj"
+
+          $bx = Get-Content $bwapiLibProject -Raw
+
+          $bx = $bx -replace `
+            '<AdditionalIncludeDirectories>', `
+            '<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;'
+
+          Set-Content `
+            $bwapiLibProject `
+            $bx `
+            -Encoding UTF8
+
+          # Retarget old VS toolsets to the runner toolset
+          Get-ChildItem "src" -Recurse -Filter *.vcxproj | ForEach-Object {
+            $p = $_.FullName
+            $x = Get-Content $p -Raw
+
+            $x = $x -replace `
+              '<PlatformToolset>v141_xp</PlatformToolset>', `
+              '<PlatformToolset>v143</PlatformToolset>'
+
+            $x = $x -replace `
+              '<PlatformToolset>v141</PlatformToolset>', `
+              '<PlatformToolset>v143</PlatformToolset>'
+
+            Set-Content `
+              $p `
+              $x `
+              -Encoding UTF8
+          }
+
+      - name: Build x86 BWAPI and v46 resident
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
+
+          msbuild ^
+            src\plutoscr_x86\PlutoSCRX86V46.vcxproj ^
+            /m ^
+            /p:Configuration=Release ^
+            /p:Platform=Win32 ^
+            /p:PlatformToolset=v143
+
+      - name: Assemble and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          New-Item `
+            -ItemType Directory `
+            -Path "artifact_v46" `
+            -Force | Out-Null
+
+          $dll = Get-ChildItem `
+            "src\plutoscr_x86" `
+            -Recurse `
+            -Filter "PlutoSCRX86V46.dll" |
+            Select-Object -First 1
+
+          if (-not $dll) {
+            throw "PlutoSCRX86V46.dll not found"
+          }
+
+          Copy-Item `
+            $dll.FullName `
+            "artifact_v46\PlutoSCRX86V46.dll" `
+            -Force
+
+          $extras = @(
+            "RUN_PLUTO_SCR_X86_V46.cmd",
+            "README_V46.txt"
+          )
+
+          foreach ($name in $extras) {
+            $f = Get-ChildItem `
+              "src" `
+              -Recurse `
+              -Filter $name |
+              Select-Object -First 1
+
+            if ($f) {
+              Copy-Item `
+                $f.FullName `
+                "artifact_v46\$name" `
+                -Force
+            }
+          }
+
+          $size = (Get-Item "artifact_v46\PlutoSCRX86V46.dll").Length
+
+          Write-Host "PlutoSCRX86V46.dll=$size bytes"
+
+          if ($size -lt 50000) {
+            throw "Unexpectedly small DLL"
+          }
+
+          Write-Host "PLUTOSCR_V46_X86_LIVE_CUNIT_BUILD=PASS"
+          Write-Host "PLUTOSCR_V46_X86_LIVE_CUNIT_PACKAGE=PASS"
+
+      - name: Upload v46
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v46-X86-Live-CUnit
+          path: artifact_v46
+          if-no-files-found: error
