@@ -58,7 +58,7 @@ jobs:
           if(-not $resident){throw "starcraft-api-resident.dll missing"}
           Copy-Item $resident.FullName package\starcraft-api-resident.dll
 
-          $injector=Get-ChildItem build64 -Recurse -Filter runtime-inject-resident-win.exe -File | Select-Object -First 1
+          $injector=Get-ChildItem build64 -Recurse -Filter starcraft-runtime-inject-resident-win.exe -File | Select-Object -First 1
           if(-not $injector){throw "runtime-inject-resident-win.exe missing"}
           Copy-Item $injector.FullName package\runtime-inject-resident-win.exe
 
