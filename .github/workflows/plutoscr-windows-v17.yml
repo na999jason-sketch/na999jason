@@ -1,0 +1,74 @@
+name: PlutoSCR v17 ABI Probe
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - PlutoSCR_GitHub_Overlay_v17.zip
+      - .github/workflows/plutoscr-windows-v17.yml
+
+jobs:
+  abi:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive PlutoSCR_GitHub_Overlay_v17.zip overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+
+      - name: Build x64 ABI probe
+        shell: pwsh
+        run: |
+          cmake -S src -B build-x64 -A x64 -DSTARCRAFT_API_BUILD_TOOLS=ON
+          cmake --build build-x64 --config Release --target plutoscr-abi-layout-x64
+          $p=Get-ChildItem build-x64 -Recurse -Filter plutoscr-abi-layout-x64.exe | Select-Object -First 1
+          if(-not $p){throw "x64 ABI probe missing"}
+          & $p.FullName | Set-Content abi-x64.tsv
+          Get-Content abi-x64.tsv
+
+      - name: Build x86 ABI probe
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_abi\AbiLayoutProbe.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          $p=Get-ChildItem src\plutoscr_abi -Recurse -Filter AbiLayoutProbe.exe | Select-Object -First 1
+          if(-not $p){throw "x86 ABI probe missing"}
+          & $p.FullName | Set-Content abi-x86.tsv
+          Get-Content abi-x86.tsv
+
+      - name: Compare ABI
+        shell: pwsh
+        run: |
+          $a=Get-Content abi-x86.tsv | Where-Object {$_ -notmatch '^arch\t' -and $_ -notmatch '^pointer\t'}
+          $b=Get-Content abi-x64.tsv | Where-Object {$_ -notmatch '^arch\t' -and $_ -notmatch '^pointer\t'}
+          $d=Compare-Object $a $b
+          if($d){
+            "PLUTOSCR_ABI_DIRECT_SHARE=NO" | Set-Content abi-verdict.txt
+            "Cross-arch layout differences:" | Add-Content abi-verdict.txt
+            $d | Out-String | Add-Content abi-verdict.txt
+          } else {
+            "PLUTOSCR_ABI_DIRECT_SHARE=YES" | Set-Content abi-verdict.txt
+            "All probed BWAPI layout sizes/offsets match between Win32 and x64." | Add-Content abi-verdict.txt
+          }
+          Get-Content abi-verdict.txt
+
+      - name: Collect
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force result | Out-Null
+          Copy-Item abi-x86.tsv,abi-x64.tsv,abi-verdict.txt result -ErrorAction SilentlyContinue
+          Get-ChildItem result | Format-Table Name,Length
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v17-ABI
+          path: result
