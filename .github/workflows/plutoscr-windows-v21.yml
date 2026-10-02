@@ -1,0 +1,83 @@
+name: PlutoSCR v21 IPC Integration
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - PlutoSCR_GitHub_Overlay_v21.zip
+      - .github/workflows/plutoscr-windows-v21.yml
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive PlutoSCR_GitHub_Overlay_v21.zip overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+
+      - name: Build x64 runtime and IPC check
+        shell: pwsh
+        run: |
+          cmake -S src -B build-x64 -A x64 -DSTARCRAFT_API_BUILD_TOOLS=ON
+          cmake --build build-x64 --config Release --parallel
+          $p=Get-ChildItem build-x64 -Recurse -Filter plutoscr-ipc-integration-check.exe | Select-Object -First 1
+          if(-not $p){throw "IPC integration check missing"}
+          & $p.FullName | Tee-Object ipc-check.txt
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          if(-not (Select-String ipc-check.txt -Pattern "PLUTOSCR_IPC_UNIFIED=PASS")){throw "IPC unification failed"}
+
+      - name: Retarget legacy BWAPI Win32
+        shell: pwsh
+        run: |
+          $projects=@(
+            "src\bwapi\BWAPIClient\BWAPIClient.vcxproj",
+            "src\bwapi\BWAPILIB\BWAPILIB.vcxproj",
+            "src\plutoscr_host\PlutoHost.vcxproj"
+          )
+          foreach($p in $projects){
+            $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+
+      - name: Build x86 PlutoHost
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_host\PlutoHost.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m 2>&1 | Tee-Object host-x86.log
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+      - name: Verify unified Host
+        shell: pwsh
+        run: |
+          $h=Get-ChildItem src\plutoscr_host -Recurse -Filter PlutoHost.exe -File | Select-Object -First 1
+          if(-not $h){throw "PlutoHost.exe missing"}
+          $src=Get-Content src\plutoscr_host\PlutoHost.cpp -Raw
+          if($src -match 'runtimeFrameSequence|hostFrameSequence'){throw "legacy v1 frame fields still present"}
+          if($src -notmatch 'publishedFrame' -or $src -notmatch 'consumedFrame'){throw "v4 frame handshake not integrated"}
+          Write-Host "PLUTOSCR_HOST_HANDSHAKE_INTEGRATED=PASS"
+          Write-Host "PlutoHost bytes=$($h.Length)"
+
+      - name: Collect
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force result | Out-Null
+          Copy-Item ipc-check.txt,host-x86.log result -ErrorAction SilentlyContinue
+          Get-ChildItem src\plutoscr_host -Recurse -Filter PlutoHost.exe -File -ErrorAction SilentlyContinue | % {Copy-Item $_.FullName result -Force}
+          Get-ChildItem build-x64 -Recurse -File -Include starcraft-api-resident.dll,plutoscr-bridge-pump.exe -ErrorAction SilentlyContinue | % {Copy-Item $_.FullName result -Force}
+          Get-ChildItem result | Format-Table Name,Length
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v21-IPC-Integration
+          path: result
