@@ -1,0 +1,69 @@
+        shell: pwsh
+        run: |
+          cmake --version
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64
+
+      - name: Configure x64
+        id: cfg64
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cmake -S src -B build-x64 -A x64 -DSTARCRAFT_API_BUILD_TOOLS=ON 2>&1 | Tee-Object configure-x64.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build x64
+        id: bld64
+        if: steps.cfg64.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cmake --build build-x64 --config Release --parallel 2>&1 | Tee-Object build-x64.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build PlutoHost x86
+        id: host32
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild "src\plutoscr_host\PlutoHost.vcxproj" /p:Configuration=Release /p:Platform=Win32 /m 2>&1 | Tee-Object build-host-x86.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect result
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force result | Out-Null
+          if (Test-Path build-x64) {
+            Get-ChildItem build-x64 -Recurse -File -Include *.exe,*.dll |
+              ForEach-Object { Copy-Item $_.FullName result -Force }
+          }
+          Get-ChildItem src\plutoscr_host -Recurse -File -Include PlutoHost.exe |
+              ForEach-Object { Copy-Item $_.FullName result -Force }
+          foreach($f in @("configure-x64.log","build-x64.log","build-host-x86.log")) {
+            if(Test-Path $f){ Copy-Item $f result -Force }
+          }
+          @(
+            "configure_x64=${{ steps.cfg64.outcome }}"
+            "build_x64=${{ steps.bld64.outcome }}"
+            "host_x86=${{ steps.host32.outcome }}"
+          ) | Set-Content result\BUILD_STATUS.txt
+          Get-ChildItem result | Sort-Object Name | Format-Table Name,Length
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v8-Windows-build
+          path: result
+          if-no-files-found: error
+
+      - name: Final status
+        if: always()
+        shell: pwsh
+        run: |
+          if ("${{ steps.cfg64.outcome }}" -ne "success") { exit 1 }
+          if ("${{ steps.bld64.outcome }}" -ne "success") { exit 1 }
+          if ("${{ steps.host32.outcome }}" -ne "success") { exit 1 }
