@@ -1,0 +1,138 @@
+name: PlutoSCR v50 x86 Live CUnit Original Pluto Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: powershell
+        run: |
+          $ErrorActionPreference="Stop"
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive "PlutoSCR_X86LiveCUnit_v50.zip" "overlay_v50" -Force
+          Copy-Item "overlay_v50\*" "src" -Recurse -Force
+
+          $bw="src\bwapi\BWAPILIB\BWAPILIB.vcxproj"
+          $x=Get-Content $bw -Raw
+          $x=$x -replace '<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;'
+          Set-Content $bw $x -Encoding UTF8
+
+          Get-ChildItem src -Recurse -Filter *.vcxproj | ForEach-Object {
+            $p=$_.FullName; $t=Get-Content $p -Raw
+            $t=$t -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $t=$t -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $t -Encoding UTF8
+          }
+
+          $proj="src\plutoscr_x86\PlutoSCRX86V50.vcxproj"
+          if(-not (Test-Path $proj)){ throw "v50 project missing" }
+
+          # Force a real DLL target and a deterministic absolute output directory.
+          [xml]$xml=Get-Content $proj
+          $ns=$xml.Project.NamespaceURI
+          $mgr=New-Object System.Xml.XmlNamespaceManager($xml.NameTable)
+          $mgr.AddNamespace("m",$ns)
+
+          $cfg=$xml.SelectNodes("//m:PropertyGroup[contains(@Condition,`"'Release|Win32'`")]",$mgr)
+          if(-not $cfg){ throw "Release|Win32 PropertyGroup not found" }
+          foreach($g in $cfg){
+            $ct=$g.SelectSingleNode("m:ConfigurationType",$mgr)
+            if(-not $ct){ $ct=$xml.CreateElement("ConfigurationType",$ns); [void]$g.AppendChild($ct) }
+            $ct.InnerText="DynamicLibrary"
+            $tn=$g.SelectSingleNode("m:TargetName",$mgr)
+            if(-not $tn){ $tn=$xml.CreateElement("TargetName",$ns); [void]$g.AppendChild($tn) }
+            $tn.InnerText="PlutoSCRX86V50"
+            $od=$g.SelectSingleNode("m:OutDir",$mgr)
+            if(-not $od){ $od=$xml.CreateElement("OutDir",$ns); [void]$g.AppendChild($od) }
+            $od.InnerText='$(SolutionDir)plutoscr_out_v50\'
+            $id=$g.SelectSingleNode("m:IntDir",$mgr)
+            if(-not $id){ $id=$xml.CreateElement("IntDir",$ns); [void]$g.AppendChild($id) }
+            $id.InnerText='$(SolutionDir)plutoscr_int_v50\'
+          }
+          $xml.Save((Resolve-Path $proj))
+
+          Write-Host "=== V50 PROJECT ==="
+          Get-Content $proj
+
+      - name: Build x86 resident and injector
+        shell: powershell
+        run: |
+          $ErrorActionPreference="Stop"
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(-not $vs){throw "Visual Studio/MSBuild not found"}
+          $msbuild=Get-ChildItem "$vs\MSBuild" -Recurse -Filter MSBuild.exe |
+            Where-Object {$_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\'} |
+            Select-Object -First 1
+          $vcvars=Get-ChildItem "$vs\VC\Auxiliary\Build" -Filter vcvars32.bat | Select-Object -First 1
+          if(-not $msbuild -or -not $vcvars){throw "x86 build tools not found"}
+
+          $outdir=(Resolve-Path src).Path + "\plutoscr_out_v50\"
+          $intdir=(Resolve-Path src).Path + "\plutoscr_int_v50\"
+          New-Item -ItemType Directory $outdir -Force | Out-Null
+          New-Item -ItemType Directory $intdir -Force | Out-Null
+
+          $cmd=@"
+          call "$($vcvars.FullName)"
+          "$($msbuild.FullName)" src\plutoscr_x86\PlutoSCRX86V50.vcxproj /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /p:ConfigurationType=DynamicLibrary /p:TargetName=PlutoSCRX86V50 /p:OutDir="$outdir" /p:IntDir="$intdir" /v:minimal
+          if errorlevel 1 exit /b 1
+          cl /nologo /EHsc /O2 /DWIN32 /D_WINDOWS src\PlutoSCRX86Inject.cpp /Fe:PlutoSCRX86Inject.exe /link kernel32.lib
+          if errorlevel 1 exit /b 1
+          "@
+          cmd.exe /D /S /C $cmd
+          if($LASTEXITCODE -ne 0){throw "v50 build failed: $LASTEXITCODE"}
+
+          Write-Host "=== FORCED OUTPUT DIRECTORY ==="
+          Get-ChildItem $outdir -Recurse -File | ForEach-Object {
+            Write-Host ("OUTPUT {0} {1}" -f $_.Length,$_.FullName)
+          }
+
+          $expected=Join-Path $outdir "PlutoSCRX86V50.dll"
+          if(-not (Test-Path $expected)){
+            Write-Host "=== ALL RECENT DLLS ==="
+            Get-ChildItem . -Recurse -File -Filter *.dll |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 30 |
+              ForEach-Object {Write-Host ("DLL {0} {1} {2:o}" -f $_.Length,$_.FullName,$_.LastWriteTime)}
+            throw "Forced resident DLL was not generated: $expected"
+          }
+
+      - name: Assemble and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference="Stop"
+          New-Item -ItemType Directory artifact_v50 -Force | Out-Null
+
+          $dll=(Resolve-Path "src\plutoscr_out_v50\PlutoSCRX86V50.dll").Path
+          $inject=(Resolve-Path "PlutoSCRX86Inject.exe").Path
+          Copy-Item $dll "artifact_v50\PlutoSCRX86V50.dll" -Force
+          Copy-Item $inject "artifact_v50\PlutoSCRX86Inject.exe" -Force
+
+          foreach($name in @("RUN_PLUTO_SCR_X86_V50.cmd","README_V50.txt")){
+            $f=Get-ChildItem src -Recurse -File -Filter $name | Select-Object -First 1
+            if($f){Copy-Item $f.FullName "artifact_v50\$name" -Force}
+          }
+
+          $ds=(Get-Item "artifact_v50\PlutoSCRX86V50.dll").Length
+          $es=(Get-Item "artifact_v50\PlutoSCRX86Inject.exe").Length
+          if($ds -lt 50000){throw "Resident DLL too small: $ds"}
+          if($es -lt 5000){throw "Injector too small: $es"}
+
+          Write-Host "PlutoSCRX86V50.dll=$ds bytes"
+          Write-Host "PlutoSCRX86Inject.exe=$es bytes"
+          Write-Host "PLUTOSCR_V50_X86_LIVE_CUNIT_BUILD=PASS"
+          Write-Host "PLUTOSCR_V50_X86_LIVE_CUNIT_PACKAGE=PASS"
+
+      - name: Upload v50
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v50-X86-Live-CUnit
+          path: artifact_v50
+          if-no-files-found: error
