@@ -1,0 +1,69 @@
+name: PlutoSCR v47 x86 Live CUnit Original Pluto Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive -Path "PlutoSCR_X86LiveCUnit_v47.zip" -DestinationPath "overlay_v47" -Force
+          Copy-Item -Path "overlay_v47\*" -Destination "src" -Recurse -Force
+          $bwapiLibProject = "src\bwapi\BWAPILIB\BWAPILIB.vcxproj"
+          $bx = Get-Content $bwapiLibProject -Raw
+          $bx = $bx -replace '<AdditionalIncludeDirectories>', '<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;'
+          Set-Content $bwapiLibProject $bx -Encoding UTF8
+          Get-ChildItem "src" -Recurse -Filter *.vcxproj | ForEach-Object {
+            $p=$_.FullName; $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+
+      - name: Build x86 BWAPI resident and injector
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars32.bat"
+          msbuild src\plutoscr_x86\PlutoSCRX86V47.vcxproj /m /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /fl /flp:logfile=msbuild-v47.log;verbosity=diagnostic
+          if errorlevel 1 (
+            type msbuild-v47.log
+            exit /b 1
+          )
+          cl /nologo /EHsc /O2 /DWIN32 /D_WINDOWS src\PlutoSCRX86Inject.cpp /Fe:PlutoSCRX86Inject.exe /link kernel32.lib
+          if errorlevel 1 exit /b 1
+
+      - name: Assemble and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference="Stop"
+          New-Item -ItemType Directory -Path "artifact_v47" -Force | Out-Null
+          $dll=Get-ChildItem "src\plutoscr_x86" -Recurse -Filter "PlutoSCRX86V47.dll" | Select-Object -First 1
+          if(-not $dll){throw "PlutoSCRX86V47.dll not found"}
+          if(-not (Test-Path "PlutoSCRX86Inject.exe")){throw "PlutoSCRX86Inject.exe not found"}
+          Copy-Item $dll.FullName "artifact_v47\PlutoSCRX86V47.dll" -Force
+          Copy-Item "PlutoSCRX86Inject.exe" "artifact_v47\PlutoSCRX86Inject.exe" -Force
+          Copy-Item "src\RUN_PLUTO_SCR_X86_V47.cmd" "artifact_v47\RUN_PLUTO_SCR_X86_V47.cmd" -Force
+          Copy-Item "src\README_V47.txt" "artifact_v47\README_V47.txt" -Force
+          $dllSize=(Get-Item "artifact_v47\PlutoSCRX86V47.dll").Length
+          $injSize=(Get-Item "artifact_v47\PlutoSCRX86Inject.exe").Length
+          if($dllSize -lt 50000){throw "Unexpectedly small DLL"}
+          if($injSize -lt 10000){throw "Unexpectedly small injector"}
+          Write-Host "PlutoSCRX86V47.dll=$dllSize bytes"
+          Write-Host "PlutoSCRX86Inject.exe=$injSize bytes"
+          Write-Host "PLUTOSCR_V47_X86_LIVE_CUNIT_BUILD=PASS"
+          Write-Host "PLUTOSCR_V47_X86_LIVE_CUNIT_PACKAGE=PASS"
+
+      - name: Upload v47
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v47-X86-Live-CUnit
+          path: artifact_v47
+          if-no-files-found: error
