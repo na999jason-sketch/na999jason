@@ -1,0 +1,88 @@
+name: PlutoSCR v32 Live Transport
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive PlutoSCR_LiveTransport_v32.zip overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+          Expand-Archive PlutoSCR_OriginalPlutoDLL_v30.zip original-pluto -Force
+          if(-not (Test-Path original-pluto\pluto.dll)){throw "original pluto.dll missing"}
+
+      - name: Build x64 runtime and resident
+        shell: pwsh
+        run: |
+          cmake -S src -B build64 -A x64
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          cmake --build build64 --config Release
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+      - name: Retarget and build x86 PlutoHost
+        shell: pwsh
+        run: |
+          $projects=@(
+            "src\bwapi\BWAPIClient\BWAPIClient.vcxproj",
+            "src\bwapi\BWAPILIB\BWAPILIB.vcxproj",
+            "src\plutoscr_host\PlutoHost.vcxproj"
+          )
+          foreach($p in $projects){
+            $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_host\PlutoHost.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+      - name: Assemble live package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+
+          $hostExe=Get-ChildItem src\plutoscr_host -Recurse -Filter PlutoHost.exe -File | Select-Object -First 1
+          if(-not $hostExe){throw "PlutoHost.exe missing"}
+          Copy-Item $hostExe.FullName package\PlutoHost.exe
+
+          $resident=Get-ChildItem build64 -Recurse -Filter starcraft-api-resident.dll -File | Select-Object -First 1
+          if(-not $resident){throw "starcraft-api-resident.dll missing"}
+          Copy-Item $resident.FullName package\starcraft-api-resident.dll
+
+          $injector=Get-ChildItem build64 -Recurse -Filter starcraft-runtime-inject-resident-win.exe -File | Select-Object -First 1
+          if(-not $injector){throw "runtime-inject-resident-win.exe missing"}
+          Copy-Item $injector.FullName package\runtime-inject-resident-win.exe
+          $liveBridge=Get-ChildItem build64 -Recurse -Filter plutoscr-live-bridge.exe -File | Select-Object -First 1
+          if(-not $liveBridge){throw "plutoscr-live-bridge.exe missing"}
+          Copy-Item $liveBridge.FullName package\plutoscr-live-bridge.exe
+          $receiver=Get-ChildItem build64 -Recurse -Filter starcraft-runtime-adapter-proof.exe -File | Select-Object -First 1
+          if(-not $receiver){throw "starcraft-runtime-adapter-proof.exe missing"}
+          Copy-Item $receiver.FullName package\starcraft-runtime-adapter-proof.exe
+
+          Copy-Item original-pluto\pluto.dll package\pluto.dll
+          Copy-Item src\RUN_PLUTO_SCR.cmd package\RUN_PLUTO_SCR.cmd
+          Copy-Item src\RUN_PLUTO_SCR.ps1 package\RUN_PLUTO_SCR.ps1
+          Copy-Item src\README_V30.txt package\README_V30.txt
+
+          "COPY ORIGINAL pluto_infer.exe HERE" | Set-Content package\PUT_pluto_infer.exe_HERE.txt
+          "COPY ORIGINAL pluto_weights.bin HERE" | Set-Content package\PUT_pluto_weights.bin_HERE.txt
+
+          Write-Host "PLUTOSCR_V30_X64_RUNTIME=PASS"
+          Write-Host "PLUTOSCR_V30_X86_HOST=PASS"
+          Write-Host "PLUTOSCR_V30_LIVE_PACKAGE=PASS"
+          Get-ChildItem package | Format-Table Name,Length
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v32-Live-Transport
+          path: package
