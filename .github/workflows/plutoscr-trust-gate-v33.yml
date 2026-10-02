@@ -1,0 +1,273 @@
+name: PlutoSCR v33 Trust Gate
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare PlutoSCR v33 overlay
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $overlay = Join-Path $env:GITHUB_WORKSPACE "PlutoSCR_TrustGate_v33.zip"
+
+          if (!(Test-Path $overlay)) {
+            throw "Missing overlay: $overlay"
+          }
+
+          Write-Host "Extracting $overlay"
+          Expand-Archive -Path $overlay `
+            -DestinationPath $env:GITHUB_WORKSPACE `
+            -Force
+
+          Write-Host "PLUTOSCR_V33_OVERLAY=PASS"
+
+      - name: Build x64 runtime and resident
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+
+          if exist build-v33-x64 rmdir /s /q build-v33-x64
+          mkdir build-v33-x64
+          cd build-v33-x64
+
+          cmake .. -G "NMake Makefiles" ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DSTARCRAFT_RUNTIME_BUILD_TESTS=OFF
+
+          cmake --build . --config Release
+
+          cd ..
+
+          if not exist "build-v33-x64\runtime-inject-resident-win.exe" (
+            echo ERROR: runtime-inject-resident-win.exe missing
+            exit /b 1
+          )
+
+          if not exist "build-v33-x64\starcraft-api-resident.dll" (
+            echo ERROR: starcraft-api-resident.dll missing
+            exit /b 1
+          )
+
+          if not exist "build-v33-x64\plutoscr_bridge\plutoscr-live-bridge.exe" (
+            echo ERROR: plutoscr-live-bridge.exe missing
+            exit /b 1
+          )
+
+          if not exist "build-v33-x64\starcraft-runtime-adapter-proof.exe" (
+            echo ERROR: starcraft-runtime-adapter-proof.exe missing
+            exit /b 1
+          )
+
+          echo PLUTOSCR_V30_X64_RUNTIME=PASS
+
+      - name: Retarget and build x86 PlutoHost
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+
+          $vs = & $vswhere `
+            -latest `
+            -products * `
+            -requires Microsoft.Component.MSBuild `
+            -property installationPath
+
+          if (!$vs) {
+            throw "Visual Studio installation not found"
+          }
+
+          $msbuild = Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+
+          if (!(Test-Path $msbuild)) {
+            throw "MSBuild not found: $msbuild"
+          }
+
+          $svnrev = Join-Path $env:GITHUB_WORKSPACE "bwapi\include\svnrev.h"
+
+          @'
+          #pragma once
+          #define SVN_REV 0
+          #define SVN_REV_STR "PlutoSCR"
+          #define SVN_REVISION 0
+          #define SVN_REVISION_STR "PlutoSCR"
+          #ifndef BUILD_DEBUG
+          #define BUILD_DEBUG 0
+          #endif
+          '@ | Set-Content -Path $svnrev -Encoding ASCII
+
+          Get-ChildItem `
+            -Path (Join-Path $env:GITHUB_WORKSPACE "bwapi") `
+            -Recurse `
+            -Include *.vcxproj |
+            ForEach-Object {
+              $p = $_.FullName
+              $text = Get-Content $p -Raw
+
+              $text = $text `
+                -replace '<PlatformToolset>v141_xp</PlatformToolset>',
+                         '<PlatformToolset>v143</PlatformToolset>'
+
+              Set-Content `
+                -Path $p `
+                -Value $text `
+                -Encoding UTF8
+            }
+
+          $hostProject = Join-Path $env:GITHUB_WORKSPACE "plutoscr_host\PlutoHost.vcxproj"
+
+          if (!(Test-Path $hostProject)) {
+            throw "Missing PlutoHost project: $hostProject"
+          }
+
+          & $msbuild `
+            $hostProject `
+            /m `
+            /p:Configuration=Release `
+            /p:Platform=Win32 `
+            /p:PlatformToolset=v143
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "PlutoHost build failed"
+          }
+
+          $host = Get-ChildItem `
+            -Path $env:GITHUB_WORKSPACE `
+            -Recurse `
+            -Filter PlutoHost.exe |
+            Where-Object {
+              $_.FullName -match 'Release'
+            } |
+            Select-Object -First 1
+
+          if (!$host) {
+            throw "PlutoHost.exe not found"
+          }
+
+          Write-Host "PlutoHost=$($host.FullName)"
+          Write-Host "PlutoHost bytes=$($host.Length)"
+          Write-Host "PLUTOSCR_V30_X86_HOST=PASS"
+
+      - name: Assemble PlutoSCR v33 Trust Gate package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $root = $env:GITHUB_WORKSPACE
+          $out  = Join-Path $root "PlutoSCR-v33-Trust-Gate"
+
+          if (Test-Path $out) {
+            Remove-Item $out -Recurse -Force
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Path $out `
+            -Force | Out-Null
+
+          $x64 = Join-Path $root "build-v33-x64"
+
+          $files = @{
+            "runtime-inject-resident-win.exe" =
+              (Join-Path $x64 "runtime-inject-resident-win.exe")
+
+            "starcraft-api-resident.dll" =
+              (Join-Path $x64 "starcraft-api-resident.dll")
+
+            "plutoscr-live-bridge.exe" =
+              (Join-Path $x64 "plutoscr_bridge\plutoscr-live-bridge.exe")
+
+            "starcraft-runtime-adapter-proof.exe" =
+              (Join-Path $x64 "starcraft-runtime-adapter-proof.exe")
+
+            "RUN_PLUTO_SCR.ps1" =
+              (Join-Path $root "RUN_PLUTO_SCR.ps1")
+
+            "RUN_PLUTO_SCR.cmd" =
+              (Join-Path $root "RUN_PLUTO_SCR.cmd")
+          }
+
+          foreach ($name in $files.Keys) {
+            $src = $files[$name]
+
+            if (!(Test-Path $src)) {
+              throw "Missing package file: $src"
+            }
+
+            Copy-Item `
+              $src `
+              (Join-Path $out $name) `
+              -Force
+          }
+
+          $host = Get-ChildItem `
+            -Path $root `
+            -Recurse `
+            -Filter PlutoHost.exe |
+            Where-Object {
+              $_.FullName -notlike "$out*"
+            } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (!$host) {
+            throw "PlutoHost.exe not found for packaging"
+          }
+
+          Copy-Item `
+            $host.FullName `
+            (Join-Path $out "PlutoHost.exe") `
+            -Force
+
+          $plutoDll = Get-ChildItem `
+            -Path $root `
+            -Recurse `
+            -Filter pluto.dll |
+            Where-Object {
+              $_.FullName -notlike "$out*"
+            } |
+            Select-Object -First 1
+
+          if ($plutoDll) {
+            Copy-Item `
+              $plutoDll.FullName `
+              (Join-Path $out "pluto.dll") `
+              -Force
+          }
+
+          $readme = Join-Path $root "README_V33.txt"
+
+          if (Test-Path $readme) {
+            Copy-Item `
+              $readme `
+              (Join-Path $out "README_V33.txt") `
+              -Force
+          }
+
+          Write-Host ""
+          Write-Host "===== PlutoSCR v33 package ====="
+
+          Get-ChildItem $out |
+            Sort-Object Name |
+            ForEach-Object {
+              Write-Host "$($_.Name) $($_.Length)"
+            }
+
+          Write-Host "PLUTOSCR_V30_LIVE_PACKAGE=PASS"
+          Write-Host "PLUTOSCR_V33_TRUST_GATE_PACKAGE=PASS"
+
+      - name: Upload PlutoSCR v33 Trust Gate
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v33-Trust-Gate
+          path: PlutoSCR-v33-Trust-Gate
+          if-no-files-found: error
+          retention-days: 90
