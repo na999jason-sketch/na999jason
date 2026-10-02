@@ -1,0 +1,71 @@
+name: PlutoSCR v39 x86 In-Process BWAPI ABI Gate
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive "$env:GITHUB_WORKSPACE\PlutoSCR_X86InProcessABI_v39.zip" overlay -Force
+          Copy-Item overlay\* src -Recurse -Force
+
+          $svn = "src\bwapi\svnrev.h"
+          if (!(Test-Path $svn)) {
+            @"
+          #pragma once
+          #define SVN_REV 0
+          #define SVN_REV_STR "0"
+          #define SVN_REVISION 0
+          #define BUILD_DEBUG 0
+          "@ | Set-Content $svn -Encoding ASCII
+          }
+
+          $projects=@("src\bwapi\BWAPIClient\BWAPIClient.vcxproj","src\bwapi\BWAPILIB\BWAPILIB.vcxproj","src\plutoscr_x86\PlutoSCRX86V39.vcxproj")
+          foreach($p in $projects){
+            $x=Get-Content $p -Raw
+            $x=$x -replace '<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            $x=$x -replace '<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>'
+            Set-Content $p $x -Encoding UTF8
+          }
+
+      - name: Build x86 BWAPI and in-process Pluto resident
+        shell: pwsh
+        run: |
+          $vswhere="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $msbuild=Join-Path $vs "MSBuild\Current\Bin\MSBuild.exe"
+          & $msbuild src\plutoscr_x86\PlutoSCRX86V39.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /m
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+
+          cmd /c """$vs\VC\Auxiliary\Build\vcvars32.bat"" && cd /d ""$env:GITHUB_WORKSPACE\src"" && cl /nologo /std:c++17 /O2 /EHsc PlutoSCRX86Inject.cpp /Fe:PlutoSCRX86Inject.exe"
+          if($LASTEXITCODE -ne 0){exit $LASTEXITCODE}
+          Write-Host "PLUTOSCR_V39_X86_INPROCESS_ABI_BUILD=PASS"
+
+      - name: Assemble and verify
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          $dll=Get-ChildItem src\plutoscr_x86 -Recurse -Filter PlutoSCRX86V39.dll -File | Select-Object -First 1
+          if(-not $dll){throw "PlutoSCRX86V39.dll missing"}
+          Copy-Item $dll.FullName package\PlutoSCRX86V39.dll
+          Copy-Item src\PlutoSCRX86Inject.exe package\
+          Copy-Item src\RUN_PLUTO_SCR_X86_V39.cmd package\
+          Copy-Item src\README_V39.txt package\
+          foreach($n in @("PlutoSCRX86V39.dll","PlutoSCRX86Inject.exe","RUN_PLUTO_SCR_X86_V39.cmd","README_V39.txt")){
+            if(!(Test-Path "package\$n")){throw "missing package file $n"}
+          }
+          Get-ChildItem package | Format-Table Name,Length
+          Write-Host "PLUTOSCR_V39_X86_INPROCESS_ABI_PACKAGE=PASS"
+
+      - name: Upload v39
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlutoSCR-v39-X86-InProcess-ABI
+          path: package
+          if-no-files-found: error
