@@ -1,0 +1,93 @@
+name: aPlutoSCR v92 x86 Game Thread Send + One Frame Delay
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git minhook
+          Expand-Archive -Path 'aPlutoSCR_X86GameThreadSend_v92.zip' -DestinationPath 'overlay_v92' -Force
+          Copy-Item -Path 'overlay_v92\*' -Destination 'src' -Recurse -Force
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/chan22222/Pluto-AI-Starcraft-Remaster/44736dd754c9a07fb8efc6412f138fb6607bcd77/src/pluto_bindings.h' -OutFile 'src\plutoscr_x86\pluto_bindings.h'
+          if(!(Test-Path 'src\plutoscr_x86\pluto_bindings.h')){throw 'pluto_bindings.h download failed'}
+          if(!(Test-Path 'minhook\include\MinHook.h')){throw 'MinHook clone failed'}
+          Write-Host 'PLUTOSCR_V92_EXACT_BINDINGS_HEADER=PASS'
+          Write-Host 'PLUTOSCR_V92_MINHOOK_SOURCE=PASS'
+
+          Get-ChildItem 'src' -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+
+          $svn='src\bwapi\BWAPILIB\Source\svnrev.h'
+          Set-Content $svn '#pragma once' -Encoding ASCII
+          Add-Content $svn '#define SVN_REV 0' -Encoding ASCII
+          Add-Content $svn '#define BUILD_DEBUG 0' -Encoding ASCII
+          if(!(Test-Path $svn)){throw 'svnrev.h generation failed'}
+          Write-Host 'PLUTOSCR_V92_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if(!(Test-Path $vw)){throw 'vswhere missing'}
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' |
+            Where-Object {$_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\'} |
+            Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+          Write-Host 'PLUTOSCR_V92_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v92 resident
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v92.ps1
+
+      - name: Assemble and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'artifact_v92' -Force | Out-Null
+          Copy-Item 'build_v92\PlutoSCRX86V92.dll' 'artifact_v92\PlutoSCRX86V92.dll'
+          Copy-Item 'build_v92\PlutoSCRX86Inject.exe' 'artifact_v92\PlutoSCRX86Inject.exe'
+          foreach($n in @('RUN_PLUTO_SCR_X86_V92.cmd','README_V92.txt')){
+            $f=Get-ChildItem 'src' -Recurse -File -Filter $n | Select-Object -First 1
+            if($f){Copy-Item $f.FullName 'artifact_v92'}
+          }
+          $d=(Get-Item 'artifact_v92\PlutoSCRX86V92.dll').Length
+          $e=(Get-Item 'artifact_v92\PlutoSCRX86Inject.exe').Length
+          if($d -lt 50000){throw "DLL too small: $d"}
+          if($e -lt 5000){throw "Injector too small: $e"}
+          Write-Host "PlutoSCRX86V92.dll=$d bytes"
+          Write-Host "PlutoSCRX86Inject.exe=$e bytes"
+          Write-Host 'PLUTOSCR_V92_X86_DIRECT_LINK_BUILD=PASS'
+
+      - name: Upload v92
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoSCR-v92-X86-Game-Thread-Send
+          path: artifact_v92
+          if-no-files-found: error
