@@ -1,0 +1,131 @@
+name: aPlutoTeamCompat v100 x86 No-Training Ally-Opaque
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare Team-Compat source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git minhook
+          Expand-Archive -Path 'aPlutoTeamCompat_X86AllyOpaqueNoTrain_v100.zip' -DestinationPath 'overlay_v100' -Force
+          Copy-Item -Path 'overlay_v100\*' -Destination 'src' -Recurse -Force
+
+          $resident='src\plutoscr_x86\PlutoSCRX86TeamCompatV100.cpp'
+          $inj='src\PlutoSCRX86Inject.cpp'
+          if(!(Test-Path $resident)){throw 'PlutoSCRX86TeamCompatV100.cpp missing after overlay copy'}
+          if(!(Test-Path $inj)){throw 'PlutoSCRX86Inject.cpp missing after overlay copy'}
+
+          $rs=Get-Content $resident -Raw
+
+          # v99 proven state/command path must remain present.
+          if($rs -notmatch 'projectRealPlayerRelations'){throw 'real SCR relation bridge missing'}
+          if($rs -notmatch '58692u'){throw 'SCR alliance matrix offset missing'}
+          if($rs -notmatch 'profile_bullet\.live_refresh=TRANSIENT_RETRY_SKIP'){throw 'v99 bullet retry missing'}
+          if($rs -notmatch 'bulletRefreshFailStreak<8'){throw 'v99 bounded bullet retry missing'}
+          if($rs -notmatch 'cunit_snapshot=SHADOW_COUNT_MISMATCH_TRANSIENT_RETRY_SKIP'){throw 'v99 CUnit retry missing'}
+          if($rs -notmatch 'cunitRefreshFailStreak<8'){throw 'v99 bounded CUnit retry missing'}
+          if($rs -notmatch 'scr_command_translation=PASS'){throw 'verified command translation path missing'}
+          if($rs -notmatch 'scr_command_sink=ARMED_GAME_THREAD_ONE_FRAME_DELAY'){throw 'game-thread send path missing'}
+
+          # Team-Compat must be observation filtering / target rejection only.
+          if($rs -notmatch 'TEAMCOMPAT_NO_TRAINING=ENABLED'){throw 'no-training marker missing'}
+          if($rs -notmatch 'TEAMCOMPAT_MODE=ALLY_OPAQUE'){throw 'ally-opaque marker missing'}
+          if($rs -notmatch 'teamCompatBindRelations'){throw 'team relation mask binding missing'}
+          if($rs -notmatch 'teamCompatRawIsAlly'){throw 'ally classifier missing'}
+          if($rs -notmatch 'TEAMCOMPAT_LIST tag='){throw 'legacy CUnit filtered-list diagnostic missing'}
+          if($rs -notmatch 'TEAMCOMPAT_ALLY_TARGET_BLOCK'){throw 'ally direct-target block missing'}
+          if($rs -notmatch 'if\(blocked\)\{offset\+=size;continue;\}'){throw 'ally packet drop-only path missing'}
+          if($rs -notmatch 'replacement target is chosen'){throw 'no replacement-target invariant comment missing'}
+          if($rs -notmatch 'g_teamCompatLastAllyHidden'){throw 'GameData ally filtering missing'}
+
+          $ix=Get-Content $inj -Raw
+          if($ix -notmatch '(?i)#include\s*[<"]tlhelp32\.h[>"]'){throw 'TlHelp32.h missing'}
+          if($ix -match 'PROCESSENTRY32A|Process32FirstA|Process32NextA'){throw 'explicit Toolhelp32 A-suffix API unexpectedly present'}
+          if($ix -notmatch 'PROCESSENTRY32' -or $ix -notmatch 'Process32First' -or $ix -notmatch 'Process32Next'){throw 'generic Toolhelp32 API missing'}
+          Write-Host 'PLUTOTEAMCOMPAT_V100_SOURCE_INVARIANTS=PASS'
+
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/chan22222/Pluto-AI-Starcraft-Remaster/44736dd754c9a07fb8efc6412f138fb6607bcd77/src/pluto_bindings.h' -OutFile 'src\plutoscr_x86\pluto_bindings.h'
+          if(!(Test-Path 'src\plutoscr_x86\pluto_bindings.h')){throw 'pluto_bindings.h download failed'}
+          if(!(Test-Path 'minhook\include\MinHook.h')){throw 'MinHook clone failed'}
+          Write-Host 'PLUTOTEAMCOMPAT_V100_EXACT_BINDINGS=PASS'
+          Write-Host 'PLUTOTEAMCOMPAT_V100_MINHOOK=PASS'
+
+          Get-ChildItem 'src' -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+
+          $svn='src\bwapi\BWAPILIB\Source\svnrev.h'
+          Set-Content $svn '#pragma once' -Encoding ASCII
+          Add-Content $svn '#define SVN_REV 0' -Encoding ASCII
+          Add-Content $svn '#define BUILD_DEBUG 0' -Encoding ASCII
+          if(!(Test-Path $svn)){throw 'svnrev.h generation failed'}
+          Write-Host 'PLUTOTEAMCOMPAT_V100_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if(!(Test-Path $vw)){throw 'vswhere missing'}
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' |
+            Where-Object {$_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\'} |
+            Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+          Write-Host 'PLUTOTEAMCOMPAT_V100_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v100 Team-Compat
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v100.ps1
+
+      - name: Assemble and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'artifact_v100' -Force | Out-Null
+          Copy-Item 'build_v100\PlutoSCRX86TeamCompatV100.dll' 'artifact_v100\PlutoSCRX86TeamCompatV100.dll'
+          Copy-Item 'build_v100\PlutoSCRX86Inject.exe' 'artifact_v100\PlutoSCRX86Inject.exe'
+
+          foreach($n in @('RUN_PLUTO_TEAMCOMPAT_X86_V100.cmd','README_TEAMCOMPAT_V100.txt')){
+            $f=Get-ChildItem 'src' -Recurse -File -Filter $n | Select-Object -First 1
+            if(!$f){throw "missing package file: $n"}
+            Copy-Item $f.FullName 'artifact_v100'
+          }
+
+          $d=(Get-Item 'artifact_v100\PlutoSCRX86TeamCompatV100.dll').Length
+          $e=(Get-Item 'artifact_v100\PlutoSCRX86Inject.exe').Length
+          if($d -lt 50000){throw "DLL too small: $d"}
+          if($e -lt 5000){throw "Injector too small: $e"}
+          Write-Host "PlutoSCRX86TeamCompatV100.dll=$d bytes"
+          Write-Host "PlutoSCRX86Inject.exe=$e bytes"
+          Write-Host 'PLUTOTEAMCOMPAT_V100_X86_BUILD_PACKAGE=PASS'
+
+      - name: Upload v100 no-training Team-Compat
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeamCompat-v100-X86-NoTrain-Ally-Opaque
+          path: artifact_v100
+          if-no-files-found: error
