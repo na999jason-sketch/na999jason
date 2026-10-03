@@ -1,0 +1,59 @@
+name: aPlutoTeam Phase1 v1 Weight Recovery Scaffold
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'pluto-team/**'
+      - '.github/workflows/aplutoteam-phase1-v1.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Locate Phase1 source
+        shell: bash
+        run: |
+          if [ -d pluto-team ]; then
+            echo "SRC=pluto-team" >> "$GITHUB_ENV"
+          else
+            mkdir -p pluto-team
+            echo "Upload the contents of aPlutoTeam_Phase1_v1 into pluto-team/" >&2
+            exit 1
+          fi
+
+      - name: Install lightweight test dependencies
+        run: python -m pip install numpy pytest
+
+      - name: Parser unit tests
+        run: |
+          cd "$SRC"
+          pytest -q tests/test_plwb.py
+
+      - name: Verify team migration source
+        shell: bash
+        run: |
+          grep -q 'new\[1\] = old\[1\]' "$SRC/make_team_checkpoint.py"
+          grep -q 'new\[2\] = old\[1\]' "$SRC/make_team_checkpoint.py"
+          grep -q 'new\[3\] = old\[2\]' "$SRC/make_team_checkpoint.py"
+          echo "PLUTOTEAM_PHASE1_V1=PASS"
+
+      - name: Package scaffold
+        run: |
+          cd "$SRC"
+          zip -r ../aPlutoTeam-Phase1-v1-Weight-Recovery-Scaffold.zip . \
+            -x '*.pt' 'weights/*' 'out/*' '__pycache__/*' '.pytest_cache/*'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase1-v1-Weight-Recovery-Scaffold
+          path: aPlutoTeam-Phase1-v1-Weight-Recovery-Scaffold.zip
