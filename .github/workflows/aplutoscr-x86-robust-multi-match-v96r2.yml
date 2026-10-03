@@ -1,0 +1,112 @@
+name: aPlutoSCR v96.2 x86 Robust Bootstrap + Multi-Match Injector API Fix
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git minhook
+          Expand-Archive -Path 'aPlutoSCR_X86RobustMultiMatch_v96.zip' -DestinationPath 'overlay_v96' -Force
+          Copy-Item -Path 'overlay_v96\*' -Destination 'src' -Recurse -Force
+
+          # v96.2 hotfix: use the same Toolhelp32 generic API names as the v93/v94 injector.
+          # The current SDK build accepts PROCESSENTRY32 / Process32First / Process32Next,
+          # while the explicit A-suffix symbols used in the v96 ZIP are not declared here.
+          $inj='src\PlutoSCRX86Inject.cpp'
+          if(!(Test-Path $inj)){throw 'PlutoSCRX86Inject.cpp missing after overlay copy'}
+          $ix=Get-Content $inj -Raw
+          if($ix -notmatch '(?i)#include\s*[<\"]tlhelp32\.h[>\"]'){
+            $ix=$ix.Replace('#include <windows.h>', "#include <windows.h>`r`n#include <tlhelp32.h>")
+          }
+          $ix=$ix.Replace('PROCESSENTRY32A','PROCESSENTRY32')
+          $ix=$ix.Replace('Process32FirstA','Process32First')
+          $ix=$ix.Replace('Process32NextA','Process32Next')
+          Set-Content $inj $ix -Encoding UTF8
+          $verify=Get-Content $inj -Raw
+          if($verify -notmatch '(?i)#include\s*[<\"]tlhelp32\.h[>\"]'){throw 'TlHelp32.h hotfix failed'}
+          if($verify -match 'PROCESSENTRY32A|Process32FirstA|Process32NextA'){throw 'Toolhelp32 A-suffix hotfix failed'}
+          if($verify -notmatch 'PROCESSENTRY32' -or $verify -notmatch 'Process32First' -or $verify -notmatch 'Process32Next'){throw 'Toolhelp32 generic API verification failed'}
+          Write-Host 'PLUTOSCR_V96_2_INJECTOR_TOOLHELP_GENERIC_API=PASS'
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/chan22222/Pluto-AI-Starcraft-Remaster/44736dd754c9a07fb8efc6412f138fb6607bcd77/src/pluto_bindings.h' -OutFile 'src\plutoscr_x86\pluto_bindings.h'
+          if(!(Test-Path 'src\plutoscr_x86\pluto_bindings.h')){throw 'pluto_bindings.h download failed'}
+          if(!(Test-Path 'minhook\include\MinHook.h')){throw 'MinHook clone failed'}
+          Write-Host 'PLUTOSCR_V96_EXACT_BINDINGS_HEADER=PASS'
+          Write-Host 'PLUTOSCR_V96_MINHOOK_SOURCE=PASS'
+
+          Get-ChildItem 'src' -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+
+          $svn='src\bwapi\BWAPILIB\Source\svnrev.h'
+          Set-Content $svn '#pragma once' -Encoding ASCII
+          Add-Content $svn '#define SVN_REV 0' -Encoding ASCII
+          Add-Content $svn '#define BUILD_DEBUG 0' -Encoding ASCII
+          if(!(Test-Path $svn)){throw 'svnrev.h generation failed'}
+          Write-Host 'PLUTOSCR_V96_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if(!(Test-Path $vw)){throw 'vswhere missing'}
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' |
+            Where-Object {$_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\'} |
+            Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+          Write-Host 'PLUTOSCR_V96_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v96 robust multi-match resident
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v96.ps1
+
+      - name: Assemble and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'artifact_v96' -Force | Out-Null
+          Copy-Item 'build_v96\PlutoSCRX86V96.dll' 'artifact_v96\PlutoSCRX86V96.dll'
+          Copy-Item 'build_v96\PlutoSCRX86Inject.exe' 'artifact_v96\PlutoSCRX86Inject.exe'
+          foreach($n in @('RUN_PLUTO_SCR_X86_V96.cmd','README_V96.txt')){
+            $f=Get-ChildItem 'src' -Recurse -File -Filter $n | Select-Object -First 1
+            if($f){Copy-Item $f.FullName 'artifact_v96'}
+          }
+          $d=(Get-Item 'artifact_v96\PlutoSCRX86V96.dll').Length
+          $e=(Get-Item 'artifact_v96\PlutoSCRX86Inject.exe').Length
+          if($d -lt 50000){throw "DLL too small: $d"}
+          if($e -lt 5000){throw "Injector too small: $e"}
+          Write-Host "PlutoSCRX86V96.dll=$d bytes"
+          Write-Host "PlutoSCRX86Inject.exe=$e bytes"
+          Write-Host 'PLUTOSCR_V96_X86_DIRECT_LINK_BUILD=PASS'
+
+      - name: Upload v96 robust multi-match
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoSCR-v96-X86-Robust-Multi-Match
+          path: artifact_v96
+          if-no-files-found: error
