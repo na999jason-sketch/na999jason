@@ -1,0 +1,109 @@
+name: aPlutoTeam Phase2B v1 PyTorch Trunk Reconstruction
+
+on:
+  workflow_dispatch:
+
+jobs:
+  reconstruct:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+      PLUTO_WEIGHTS_SHA256: 00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Phase2B source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d pluto-team || { echo "pluto-team folder missing"; exit 1; }
+          if [ ! -f pluto-team/run_phase2b_v1.py ]; then
+            test -f pluto-team/aPlutoTeam_Phase2B_v1.zip || { echo "Phase2B ZIP missing"; exit 1; }
+            unzip -o pluto-team/aPlutoTeam_Phase2B_v1.zip -d pluto-team
+          fi
+          test -f pluto-team/pluto_trunk.py
+          test -f pluto-team/plwb.py
+          test -f pluto-team/run_phase2b_v1.py
+          mkdir -p pluto-team/phase2b-out pluto-team/official-release
+          echo "PHASE2B_SOURCE_READY=YES"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pytest
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python - <<'PY'
+          import torch
+          print("torch",torch.__version__)
+          print("threads",torch.get_num_threads())
+          PY
+
+      - name: Helper unit tests
+        shell: bash
+        run: |
+          cd pluto-team
+          export PYTHONPATH="$PWD"
+          python -m pytest -q test_phase2b_helpers.py
+
+      - name: Download official Pluto weights
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd pluto-team/official-release
+          curl --fail --location --retry 5 --retry-delay 3 -o pluto.zip "$PLUTO_RELEASE_URL"
+          echo "$PLUTO_RELEASE_SHA256  pluto.zip" | sha256sum --check -
+          unzip -o pluto.zip
+          WEIGHTS="$(find . -type f -name pluto_weights.bin -print -quit)"
+          test -n "$WEIGHTS"
+          echo "$PLUTO_WEIGHTS_SHA256  $WEIGHTS" | sha256sum --check -
+          echo "PLUTO_WEIGHTS=$GITHUB_WORKSPACE/pluto-team/official-release/${WEIGHTS#./}" >> "$GITHUB_ENV"
+          echo "OFFICIAL_WEIGHTS_READY=PASS"
+
+      - name: Run PyTorch first-step reconstruction
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd pluto-team
+          export PYTHONPATH="$PWD"
+          python run_phase2b_v1.py \
+            --weights "$PLUTO_WEIGHTS" \
+            --out phase2b-out \
+            --coord-mode center01
+
+      - name: Validate report structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          p=json.load(open("pluto-team/phase2b-out/phase2b_v1_report.json"))
+          assert p["format"]=="pluto-team-phase2b-v1"
+          assert "action_match" in p["comparison"]
+          for k in ["u0","planes","s64","s32","s8","U","xt","slow_top","h1","action_logits","win_logits"]:
+              assert k in p["stages"]
+              assert len(p["stages"][k]["sha256_f32"])==64
+          print("PHASE2B_REPORT_STRUCTURE=PASS")
+          PY
+          cat pluto-team/phase2b-out/phase2b_v1_summary.txt
+
+      - name: Remove official release
+        shell: bash
+        run: rm -rf pluto-team/official-release
+
+      - name: Upload Phase2B diagnostic
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase2B-v1-PyTorch-Trunk-Diagnostic
+          path: pluto-team/phase2b-out
+          compression-level: 9
