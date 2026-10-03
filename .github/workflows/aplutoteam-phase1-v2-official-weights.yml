@@ -1,0 +1,275 @@
+name: aPlutoTeam Phase1 v2 Official Weights Recovery + Team Seed
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      PLUTO_RELEASE_TAG: cog2026-2578600
+      PLUTO_RELEASE_ZIP: pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+      PLUTO_WEIGHTS_SHA256: 00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e
+      EXPECTED_TENSORS: "269"
+      EXPECTED_PARAMS: "315040001"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Pluto-Team Phase1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d pluto-team || { echo "pluto-team folder missing"; exit 1; }
+
+          if [ ! -f pluto-team/plwb.py ]; then
+            if [ -f pluto-team/aPlutoTeam_Phase1_v1.zip ]; then
+              echo "Extracting Phase1 scaffold..."
+              unzip -o pluto-team/aPlutoTeam_Phase1_v1.zip -d pluto-team
+            else
+              echo "Missing pluto-team/plwb.py and aPlutoTeam_Phase1_v1.zip"
+              exit 1
+            fi
+          fi
+
+          test -f pluto-team/plwb.py
+          test -f pluto-team/export_trainable_checkpoint.py
+          test -f pluto-team/make_team_checkpoint.py
+          test -f pluto-team/inspect_checkpoint.py
+
+          mkdir -p pluto-team/weights pluto-team/out
+          echo "SRC=pluto-team" >> "$GITHUB_ENV"
+          echo "PLUTOTEAM_SOURCE_READY=YES"
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install numpy
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python - <<'PY'
+          import torch, numpy
+          print("torch", torch.__version__)
+          print("numpy", numpy.__version__)
+          print("cuda_available", torch.cuda.is_available())
+          PY
+
+      - name: Download official Pluto CoG 2026 release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC/weights"
+          curl --fail --location --retry 5 --retry-delay 3 \
+            --output "$PLUTO_RELEASE_ZIP" "$PLUTO_RELEASE_URL"
+
+          echo "$PLUTO_RELEASE_SHA256  $PLUTO_RELEASE_ZIP" | sha256sum --check -
+          echo "OFFICIAL_RELEASE_ZIP_SHA256=PASS"
+
+          unzip -l "$PLUTO_RELEASE_ZIP" | sed -n '1,80p'
+          unzip -o "$PLUTO_RELEASE_ZIP"
+
+          WEIGHTS_PATH="$(find . -type f -name pluto_weights.bin -print -quit)"
+          test -n "$WEIGHTS_PATH"
+          echo "Found weights: $WEIGHTS_PATH"
+
+          echo "$PLUTO_WEIGHTS_SHA256  $WEIGHTS_PATH" | sha256sum --check -
+          echo "OFFICIAL_PLUTO_WEIGHTS_SHA256=PASS"
+
+          cp "$WEIGHTS_PATH" ./pluto_weights.bin
+          echo "WEIGHTS=$GITHUB_WORKSPACE/$SRC/weights/pluto_weights.bin" >> "$GITHUB_ENV"
+
+      - name: Validate real PLWB container
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+          python - <<'PY'
+          import os
+          from plwb import PLWB
+
+          b = PLWB(os.environ["WEIGHTS"])
+          s = b.summary()
+          print("PLWB_SUMMARY", s)
+
+          assert s["version"] == 1
+          assert s["tensor_count"] == int(os.environ["EXPECTED_TENSORS"]), s
+          assert s["parameter_count"] == int(os.environ["EXPECTED_PARAMS"]), s
+          assert tuple(b.by_name["owner_emb.weight"].shape) == (3, 256)
+
+          print("owner_emb.weight", b.by_name["owner_emb.weight"])
+          print("REAL_PLWB_VALIDATION=PASS")
+          PY
+
+      - name: Export trainable BF16 checkpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+          python export_trainable_checkpoint.py \
+            "$WEIGHTS" \
+            out/pluto_cog2026_2578600_trainable_bf16.pt \
+            --dtype bfloat16
+
+          test -s out/pluto_cog2026_2578600_trainable_bf16.pt
+          echo "TRAINABLE_CHECKPOINT_EXPORT=PASS"
+
+      - name: Create policy-preserving Pluto-Team seed
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          python make_team_checkpoint.py \
+            out/pluto_cog2026_2578600_trainable_bf16.pt \
+            out/pluto_team_seed_v1_bf16.pt
+
+          python inspect_checkpoint.py out/pluto_team_seed_v1_bf16.pt
+          echo "TEAM_SEED_CHECKPOINT=PASS"
+
+      - name: Verify recovered tensor values
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+          python - <<'PY'
+          import os
+          import numpy as np
+          import torch
+          from plwb import PLWB
+
+          blob = PLWB(os.environ["WEIGHTS"])
+          ckpt = torch.load(
+              "out/pluto_cog2026_2578600_trainable_bf16.pt",
+              map_location="cpu",
+              weights_only=False,
+          )
+          state = ckpt["state_dict"]
+
+          probes = [
+              "null_unit_enc",
+              "owner_emb.weight",
+              "continuous_proj.0.weight",
+              "encoder.layers.0.wqkv.weight",
+              "gru.h0",
+          ]
+
+          for name in probes:
+              expected = blob.dequantized(name).astype(np.float32)
+              actual = state[name].float().cpu().numpy()
+
+              # BF16 export is intentionally lossy only by BF16 rounding.
+              max_abs = float(np.max(np.abs(actual - expected)))
+              scale = max(1.0, float(np.max(np.abs(expected))))
+              rel = max_abs / scale
+              print(name, "shape", actual.shape, "max_abs", max_abs, "scaled_rel", rel)
+
+              if rel > 0.01:
+                  raise SystemExit(f"FAIL excessive BF16 recovery error for {name}: {rel}")
+
+          print("RECOVERED_TENSOR_VALUE_PROBES=PASS")
+          PY
+
+      - name: Verify team owner migration exactly
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          python - <<'PY'
+          import torch
+
+          base = torch.load(
+              "out/pluto_cog2026_2578600_trainable_bf16.pt",
+              map_location="cpu",
+              weights_only=False,
+          )
+          team = torch.load(
+              "out/pluto_team_seed_v1_bf16.pt",
+              map_location="cpu",
+              weights_only=False,
+          )
+
+          a = base["state_dict"]["owner_emb.weight"]
+          b = team["state_dict"]["owner_emb.weight"]
+
+          assert tuple(a.shape) == (3, 256)
+          assert tuple(b.shape) == (4, 256)
+          assert torch.equal(b[0], a[0])   # self
+          assert torch.equal(b[1], a[1])   # ally <- old other
+          assert torch.equal(b[2], a[1])   # enemy <- old other
+          assert torch.equal(b[3], a[2])   # neutral
+          assert torch.equal(b[1], b[2])   # policy-preserving before training
+
+          print("TEAM_OWNER_MIGRATION_EXACT=PASS")
+          PY
+
+      - name: Build recovery manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+
+          BASE_SHA="$(sha256sum out/pluto_cog2026_2578600_trainable_bf16.pt | awk '{print $1}')"
+          TEAM_SHA="$(sha256sum out/pluto_team_seed_v1_bf16.pt | awk '{print $1}')"
+          BASE_SIZE="$(stat -c '%s' out/pluto_cog2026_2578600_trainable_bf16.pt)"
+          TEAM_SIZE="$(stat -c '%s' out/pluto_team_seed_v1_bf16.pt)"
+
+          cat > out/RECOVERY_MANIFEST.txt <<EOF
+          Pluto-Team Phase1 v2
+          source_release=$PLUTO_RELEASE_TAG
+          source_release_sha256=$PLUTO_RELEASE_SHA256
+          source_weights_sha256=$PLUTO_WEIGHTS_SHA256
+          expected_tensor_count=$EXPECTED_TENSORS
+          expected_parameter_count=$EXPECTED_PARAMS
+          base_checkpoint=pluto_cog2026_2578600_trainable_bf16.pt
+          base_checkpoint_bytes=$BASE_SIZE
+          base_checkpoint_sha256=$BASE_SHA
+          team_checkpoint=pluto_team_seed_v1_bf16.pt
+          team_checkpoint_bytes=$TEAM_SIZE
+          team_checkpoint_sha256=$TEAM_SHA
+          owner_vocab=self,ally,enemy,neutral
+          owner_migration=new0=old0,new1=old1,new2=old1,new3=old2
+          status=PASS
+          EOF
+
+          cat out/RECOVERY_MANIFEST.txt
+
+      - name: Remove temporary official release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$SRC/weights"
+          echo "TEMP_RELEASE_FILES_REMOVED=YES"
+
+      - name: Upload recovery manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase1-v2-Recovery-Manifest
+          path: pluto-team/out/RECOVERY_MANIFEST.txt
+          compression-level: 0
+
+      - name: Upload trainable base checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase1-v2-Trainable-BF16
+          path: pluto-team/out/pluto_cog2026_2578600_trainable_bf16.pt
+          compression-level: 0
+
+      - name: Upload Pluto-Team seed checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase1-v2-Team-Seed-BF16
+          path: pluto-team/out/pluto_team_seed_v1_bf16.pt
+          compression-level: 0
