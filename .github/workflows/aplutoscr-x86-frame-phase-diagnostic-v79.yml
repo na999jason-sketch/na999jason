@@ -1,0 +1,100 @@
+name: aPlutoSCR v79 x86 Frame Phase Diagnostic
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          Expand-Archive -Path 'aPlutoSCR_X86FramePhaseDiagnostic_v79.zip' -DestinationPath 'overlay_v79' -Force
+          Copy-Item -Path 'overlay_v79\*' -Destination 'src' -Recurse -Force
+
+          Get-ChildItem 'src' -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+
+          $svn='src\bwapi\BWAPILIB\Source\svnrev.h'
+          Set-Content $svn '#pragma once' -Encoding ASCII
+          Add-Content $svn '#define SVN_REV 0' -Encoding ASCII
+          Add-Content $svn '#define BUILD_DEBUG 0' -Encoding ASCII
+          if(!(Test-Path $svn)){throw 'svnrev.h generation failed'}
+          if((Get-Content $p -Raw) -notmatch [regex]::Escape('$(ProjectDir)Source;$(ProjectDir)..;')){
+            throw 'MSBuild ProjectDir literal was not preserved'
+          }
+          Write-Host 'PLUTOSCR_V79_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if(!(Test-Path $vw)){throw 'vswhere missing'}
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' |
+            Where-Object {$_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\'} |
+            Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+
+          $libs=Get-ChildItem 'src' -Recurse -File -Filter '*.lib'
+          $client=$libs | Where-Object {$_.Name -ieq 'BWAPIClient.lib'} | Select-Object -First 1
+          $bwapi=$libs | Where-Object {$_.Name -ieq 'BWAPILIB.lib'} | Select-Object -First 1
+          if(!$client -or !$bwapi){throw 'Required BWAPI static libraries not found'}
+          Write-Host "BWAPILIB=$($bwapi.FullName)"
+          Write-Host "BWAPIClient=$($client.FullName)"
+          Write-Host 'PLUTOSCR_V79_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v79 resident
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v79.ps1
+
+      - name: Assemble and verify
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'artifact_v79' -Force | Out-Null
+          Copy-Item 'build_v79\PlutoSCRX86V79.dll' 'artifact_v79\PlutoSCRX86V79.dll'
+          Copy-Item 'build_v79\PlutoSCRX86Inject.exe' 'artifact_v79\PlutoSCRX86Inject.exe'
+
+          foreach($n in @('RUN_PLUTO_SCR_X86_V79.cmd','README_V79.txt')){
+            $f=Get-ChildItem 'src' -Recurse -File -Filter $n | Select-Object -First 1
+            if($f){Copy-Item $f.FullName 'artifact_v79'}
+          }
+
+          $d=(Get-Item 'artifact_v79\PlutoSCRX86V79.dll').Length
+          $e=(Get-Item 'artifact_v79\PlutoSCRX86Inject.exe').Length
+          if($d -lt 50000){throw "DLL too small: $d"}
+          if($e -lt 5000){throw "Injector too small: $e"}
+          Write-Host "PlutoSCRX86V79.dll=$d bytes"
+          Write-Host "PlutoSCRX86Inject.exe=$e bytes"
+          Write-Host 'PLUTOSCR_V79_X86_DIRECT_LINK_BUILD=PASS'
+          Write-Host 'PLUTOSCR_V79_X86_DIRECT_LINK_PACKAGE=PASS'
+
+      - name: Upload v79
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoSCR-v79-X86-Frame-Phase-Diagnostic
+          path: artifact_v79
+          if-no-files-found: error
