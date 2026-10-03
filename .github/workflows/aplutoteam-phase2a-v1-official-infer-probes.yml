@@ -1,0 +1,116 @@
+name: aPlutoTeam Phase2A v1 Official Infer Black-Box Probes
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+      PLUTO_WEIGHTS_SHA256: 00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Phase2A source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if (-not (Test-Path "pluto-team")) {
+            throw "pluto-team folder missing"
+          }
+
+          if (-not (Test-Path "pluto-team/probe_pluto_infer_pipe.py")) {
+            if (Test-Path "pluto-team/aPlutoTeam_Phase2A_v1.zip") {
+              Write-Host "Extracting Phase2A package..."
+              Expand-Archive -Path "pluto-team/aPlutoTeam_Phase2A_v1.zip" -DestinationPath "pluto-team" -Force
+            } else {
+              throw "Missing pluto-team/probe_pluto_infer_pipe.py and Phase2A ZIP"
+            }
+          }
+
+          if (-not (Test-Path "pluto-team/probe_pluto_infer_pipe.py")) {
+            throw "Phase2A probe script missing after extraction"
+          }
+          New-Item -ItemType Directory -Force -Path "pluto-team/phase2a-out" | Out-Null
+          Write-Host "PLUTOTEAM_PHASE2A_SOURCE_READY=YES"
+
+      - name: Protocol packing unit tests
+        shell: pwsh
+        run: |
+          python -m pip install pytest
+          Push-Location pluto-team
+          python -m pytest -q test_phase2a_protocol.py
+          Pop-Location
+
+      - name: Download official Pluto release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = Join-Path $PWD "pluto-team\pluto-cog2026-2578600.zip"
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o $zip $env:PLUTO_RELEASE_URL
+          if ($LASTEXITCODE -ne 0) { throw "curl failed" }
+
+          $zipSha = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($zipSha -ne $env:PLUTO_RELEASE_SHA256) {
+            throw "Release SHA mismatch: $zipSha"
+          }
+          Write-Host "OFFICIAL_RELEASE_ZIP_SHA256=PASS"
+
+          $dest = Join-Path $PWD "pluto-team\official-release"
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+
+          $weights = Join-Path $dest "pluto\pluto_weights.bin"
+          $infer = Join-Path $dest "pluto\pluto_infer.exe"
+          if (-not (Test-Path $weights)) { throw "pluto_weights.bin missing" }
+          if (-not (Test-Path $infer)) { throw "pluto_infer.exe missing" }
+
+          $weightsSha = (Get-FileHash -Algorithm SHA256 $weights).Hash.ToLower()
+          if ($weightsSha -ne $env:PLUTO_WEIGHTS_SHA256) {
+            throw "Weights SHA mismatch: $weightsSha"
+          }
+          Write-Host "OFFICIAL_PLUTO_WEIGHTS_SHA256=PASS"
+
+          "PLUTO_INFER=$infer" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "PLUTO_WEIGHTS=$weights" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run official infer pipe probes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python pluto-team/probe_pluto_infer_pipe.py `
+            --exe "$env:PLUTO_INFER" `
+            --weights "$env:PLUTO_WEIGHTS" `
+            --out "pluto-team/phase2a-out" `
+            --seed 123456789 `
+            --threads 1
+
+      - name: Show probe summary
+        shell: pwsh
+        run: |
+          Get-Content "pluto-team/phase2a-out/phase2a_blackbox_summary.txt"
+          Write-Host "PHASE2A_SUMMARY=PASS"
+
+      - name: Remove official binaries before artifact upload
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force "pluto-team/official-release"
+          Remove-Item -Force "pluto-team/pluto-cog2026-2578600.zip"
+          Write-Host "OFFICIAL_BINARIES_REMOVED=YES"
+
+      - name: Upload black-box parity probes
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase2A-v1-Official-Infer-Probes
+          path: pluto-team/phase2a-out
+          compression-level: 9
