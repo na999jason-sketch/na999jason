@@ -1,0 +1,74 @@
+name: aPlutoTeam Phase1 v1.2 Auto Extract + Import Fix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'pluto-team/**'
+      - '.github/workflows/aplutoteam-phase1-v1.2.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Phase1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d pluto-team || { echo "pluto-team folder missing"; exit 1; }
+
+          if [ ! -f pluto-team/tests/test_plwb.py ]; then
+            if [ -f pluto-team/aPlutoTeam_Phase1_v1.zip ]; then
+              echo "Phase1 files not expanded; extracting ZIP automatically..."
+              unzip -o pluto-team/aPlutoTeam_Phase1_v1.zip -d pluto-team
+            else
+              echo "Missing pluto-team/tests/test_plwb.py and Phase1 ZIP"
+              exit 1
+            fi
+          fi
+
+          test -f pluto-team/plwb.py
+          test -f pluto-team/make_team_checkpoint.py
+          test -f pluto-team/tests/test_plwb.py
+          echo "SRC=pluto-team" >> "$GITHUB_ENV"
+          echo "PLUTOTEAM_SOURCE_READY=YES"
+
+      - name: Install lightweight test dependencies
+        run: python -m pip install numpy pytest
+
+      - name: Parser unit tests
+        shell: bash
+        run: |
+          cd "$SRC"
+          export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+          python -m pytest -q tests/test_plwb.py
+
+      - name: Verify team migration source
+        shell: bash
+        run: |
+          grep -q 'new\[1\] = old\[1\]' "$SRC/make_team_checkpoint.py"
+          grep -q 'new\[2\] = old\[1\]' "$SRC/make_team_checkpoint.py"
+          grep -q 'new\[3\] = old\[2\]' "$SRC/make_team_checkpoint.py"
+          echo "PLUTOTEAM_PHASE1_V1_2=PASS"
+
+      - name: Package scaffold
+        shell: bash
+        run: |
+          cd "$SRC"
+          zip -r ../aPlutoTeam-Phase1-v1.2-Weight-Recovery-Scaffold.zip . \
+            -x '*.pt' 'weights/*' 'out/*' '__pycache__/*' '.pytest_cache/*' 'aPlutoTeam_Phase1_v1.zip'
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase1-v1.2-Weight-Recovery-Scaffold
+          path: aPlutoTeam-Phase1-v1.2-Weight-Recovery-Scaffold.zip
