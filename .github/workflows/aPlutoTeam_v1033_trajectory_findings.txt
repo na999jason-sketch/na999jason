@@ -1,0 +1,54 @@
+aPlutoTeam v103.3 trajectory findings
+=======================================
+
+Dataset
+-------
+Generation 1: 2,192 recorded model steps, final frame 20,207,
+~295.7 MB trajectory payload.
+
+Key finding: owner rewrite drift, not merely untrained ally embedding
+--------------------------------------------------------------------
+The v103.3 matcher used live raw SCR CUnits. By late game, moving-unit
+x/y/order drift caused many observation rows to fail matching.
+
+Across all 2,192 steps:
+- only ~20.0% of steps had unmatched=0
+- median unmatched rows: 16
+- maximum unmatched rows: 66
+- median unmatched rate among non-self player rows: ~18.5%
+- maximum unmatched rate: ~47.8%
+
+Unmatched non-self rows were defaulted to ENEMY.
+
+The periodic live relation logs and rewritten model input prove the effect:
+enemy over-count is extremely correlated with unmatched rows (r ≈ 0.974).
+
+Concrete suspicious ally-base episode
+-------------------------------------
+At model step frame 17,928:
+- Pluto action: a=6 AttackMove
+- selected own units: 13
+- decoded destination: (3280, 2992)
+- destination is directly inside the 5-o'clock Zerg ally cluster
+- rewritten model view within 256 px of target: 18 ally, 5 enemy
+- unmatched rows in that step: 38
+
+At model step frame 19,337:
+- Pluto action: a=6 AttackMove
+- selected own units: 7
+- decoded destination: (3856, 2576)
+- rewritten view within 256 px: 17 ally, 3 enemy
+- unmatched rows: 58
+
+Around those frames the live relation logger reported only roughly 9-22
+actually visible enemies globally, while the rewritten model request often
+contained 40-60+ enemy rows. The excess tracks unmatched rows.
+
+Conclusion
+----------
+Do NOT train ally embedding from this v103.3 dataset yet. Relation labels are
+too contaminated late game. First fix owner row matching, recollect a clean
+trajectory, and require late-game unmatched to remain near zero.
+
+v104 implements that compatibility fix by matching against the coherent
+g_legacyCUnits[] shadow that original Pluto observed for the same snapshot.
