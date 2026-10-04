@@ -1,0 +1,200 @@
+name: aPlutoTeamRuntime v103.3 x86 V102 Rollback Delayed Recorder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare v103.3 v102-rollback source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git minhook
+
+          $zip='pluto-team\aPlutoTeamRuntime_X86RecorderRollback_v103_3.zip'
+          if(!(Test-Path $zip)){throw "v103.3 source ZIP missing: $zip"}
+          Expand-Archive -Path $zip -DestinationPath 'overlay_v103_3' -Force
+          Copy-Item -Path 'overlay_v103_3\*' -Destination 'src' -Recurse -Force
+
+          $resident='src\plutoscr_x86\PlutoSCRX86TeamRuntimeV103_3.cpp'
+          $prep='src\plutoscr_x86\PlutoTeamRuntimePrepV103_3.cpp'
+          $inj='src\PlutoSCRX86Inject.cpp'
+          foreach($f in @($resident,$prep,$inj)){if(!(Test-Path $f)){throw "missing $f"}}
+          $rs=Get-Content $resident -Raw
+          $ps=Get-Content $prep -Raw
+
+          # Preserve proven v102 runtime path exactly before recorder arming.
+          foreach($m in @(
+            'projectRealPlayerRelations',
+            '58692u',
+            'profile_bullet.live_refresh=TRANSIENT_RETRY_SKIP',
+            'bulletRefreshFailStreak<8',
+            'cunit_snapshot=SHADOW_COUNT_MISMATCH_TRANSIENT_RETRY_SKIP',
+            'cunitRefreshFailStreak<8',
+            'scr_command_translation=PASS',
+            'scr_command_sink=ARMED_GAME_THREAD_ONE_FRAME_DELAY',
+            'TEAM_RUNTIME_ALLY_TARGET_BLOCK',
+            'TEAM_RUNTIME_CUNIT_LIST=ALLY_VISIBLE_FULL_CHAIN'
+          )){if($rs -notmatch [regex]::Escape($m)){throw "missing proven invariant: $m"}}
+
+          # Proven v102 model boundary plus delayed recorder isolation.
+          foreach($m in @(
+            'TEAM_RUNTIME_MODE=FOURWAY_OWNER_INGAME',
+            'TEAM_RUNTIME_MODEL_OWNER_ENCODING=SELF0_ALLY1_ENEMY2_NEUTRAL3',
+            'TEAM_RUNTIME_TEAM4_SEED=ALLY_EQUALS_ENEMY_INITIAL_WEIGHTS',
+            'TEAM4_SET_EVENT_HOOK=INSTALLED',
+            'TEAM4_SHM_TRANSPORT=ACTIVE',
+            'TEAM4_SHM_OWNER_REWRITE=PASS',
+            'TEAM4_OWNER_SAMPLE',
+            'TEAM4_ENGINE_RUNTIME=PATCH_VERIFIED',
+            'TEAM4_WEIGHTS_RUNTIME=OWNER_EMB_4X256_VERIFIED',
+            'V103_3_BASELINE=V102_KNOWN_GOOD_EXACT_HOOK',
+            'TEAM_TRAINING_RECORDER=DELAYED_ARM_AFTER_FIRST_SUCCESSFUL_PLUTO_FRAME',
+            'recorder33ArmAfterFirstFrame'
+          )){if($rs -notmatch [regex]::Escape($m)){throw "missing v103.3 invariant: $m"}}
+
+          if($rs -match 'ALLY_OPAQUE'){throw 'obsolete ally opaque mode present'}
+          if($rs -match 'ORIGINAL_3WAY_NOT_YET_4WAY'){throw 'stale 3-way marker present'}
+
+          foreach($m in @(
+            '59203',
+            'ad880d8be52a6ef03893fa20644b6627e04fcd55e030178c6d52486b82340f2b',
+            '00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e',
+            'owner_emb.weight',
+            '4,256',
+            'TEAM4_PREP=PASS'
+          )){if($ps -notmatch [regex]::Escape($m)){throw "runtime prep invariant missing: $m"}}
+
+          if(!(Test-Path 'src\plutoscr_x86\trajectory_v103.py')){throw 'trajectory parser missing'}
+          python 'src\plutoscr_x86\trajectory_v103.py' --selftest
+          if($LASTEXITCODE -ne 0){throw 'PTRJ103 parser selftest failed'}
+          Write-Host 'PLUTOTEAMRUNTIME_V103_3_SOURCE_INVARIANTS=PASS'
+
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/chan22222/Pluto-AI-Starcraft-Remaster/44736dd754c9a07fb8efc6412f138fb6607bcd77/src/pluto_bindings.h' -OutFile 'src\plutoscr_x86\pluto_bindings.h'
+          if(!(Test-Path 'src\plutoscr_x86\pluto_bindings.h')){throw 'pluto_bindings.h download failed'}
+          if(!(Test-Path 'minhook\include\MinHook.h')){throw 'MinHook clone failed'}
+
+          Get-ChildItem 'src' -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+          $svn='src\bwapi\BWAPILIB\Source\svnrev.h'
+          Set-Content $svn '#pragma once' -Encoding ASCII
+          Add-Content $svn '#define SVN_REV 0' -Encoding ASCII
+          Add-Content $svn '#define BUILD_DEBUG 0' -Encoding ASCII
+          Write-Host 'PLUTOTEAMRUNTIME_V103_3_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if(!(Test-Path $vw)){throw 'vswhere missing'}
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' |
+            Where-Object {$_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\'} |
+            Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+          Write-Host 'PLUTOTEAMRUNTIME_V103_3_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v103.3
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v103.3.ps1
+
+      - name: Validate runtime prep against exact official Pluto
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'runtime_test\pluto' -Force | Out-Null
+          New-Item -ItemType Directory 'official_unpack' -Force | Out-Null
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o 'official_pluto.zip' $env:PLUTO_RELEASE_URL
+          if($LASTEXITCODE -ne 0){throw 'official download failed'}
+          $sha=(Get-FileHash -Algorithm SHA256 'official_pluto.zip').Hash.ToLower()
+          if($sha -ne $env:PLUTO_RELEASE_SHA256){throw "release SHA mismatch $sha"}
+          Expand-Archive 'official_pluto.zip' 'official_unpack' -Force
+          Copy-Item 'official_unpack\pluto\pluto_infer.exe' 'runtime_test\pluto\pluto_infer.exe'
+          Copy-Item 'official_unpack\pluto\pluto_weights.bin' 'runtime_test\pluto\pluto_weights.bin'
+
+          & '.\build_v103_3\PlutoTeamRuntimePrepV103_3.exe' "$PWD\runtime_test"
+          if($LASTEXITCODE -ne 0){throw "runtime prep selftest failed: $LASTEXITCODE"}
+
+          $b=[IO.File]::ReadAllBytes((Resolve-Path 'runtime_test\pluto\pluto_infer.exe'))
+          $sig=($b[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          Write-Host "TEAM4_ENGINE_PATCH_BYTES=$sig"
+          if($sig -ne '41B904000000'){throw "patched engine signature mismatch: $sig"}
+
+          python 'src\plutoscr_x86\probe-v103.3-team4.py' --root 'runtime_test'
+          if($LASTEXITCODE -ne 0){throw 'four-way parity probe failed'}
+          Write-Host 'PLUTOTEAMRUNTIME_V103_3_OFFICIAL_ENGINE_PARITY=PASS'
+
+          Remove-Item -Recurse -Force 'runtime_test','official_unpack'
+          Remove-Item -Force 'official_pluto.zip'
+
+      - name: Assemble and verify v102 runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'artifact_v103_3' -Force | Out-Null
+          Copy-Item 'build_v103_3\PlutoSCRX86TeamRuntimeV103_3.dll' 'artifact_v103_3\PlutoSCRX86TeamRuntimeV103_3.dll'
+          Copy-Item 'build_v103_3\PlutoSCRX86Inject.exe' 'artifact_v103_3\PlutoSCRX86Inject.exe'
+          Copy-Item 'build_v103_3\PlutoTeamRuntimePrepV103_3.exe' 'artifact_v103_3\PlutoTeamRuntimePrepV103_3.exe'
+
+          foreach($n in @('RUN_PLUTO_TEAMRUNTIME_X86_V103_3.cmd','RESTORE_PLUTO_OFFICIAL_V103_3.cmd','README_TEAMRUNTIME_V103_3.txt','PACK_PLUTO_TEAM_TRAINING_DATA_V103_3.cmd','trajectory_v103.py')){
+            $f=Get-ChildItem 'src' -Recurse -File -Filter $n | Select-Object -First 1
+            if(!$f){throw "missing package file: $n"}
+            Copy-Item $f.FullName 'artifact_v103_3'
+          }
+
+          foreach($f in @('artifact_v103_3\PlutoSCRX86TeamRuntimeV103_3.dll','artifact_v103_3\PlutoSCRX86Inject.exe','artifact_v103_3\PlutoTeamRuntimePrepV103_3.exe')){
+            $b=[IO.File]::ReadAllBytes((Resolve-Path $f))
+            $pe=[BitConverter]::ToInt32($b,0x3c)
+            $m=[BitConverter]::ToUInt16($b,$pe+4)
+            Write-Host ("PE_MACHINE {0} 0x{1:X4}" -f $f,$m)
+            if($m -ne 0x014c){throw "non-x86 output: $f"}
+          }
+
+          $d=(Get-Item 'artifact_v103_3\PlutoSCRX86TeamRuntimeV103_3.dll').Length
+          $i=(Get-Item 'artifact_v103_3\PlutoSCRX86Inject.exe').Length
+          $p=(Get-Item 'artifact_v103_3\PlutoTeamRuntimePrepV103_3.exe').Length
+          if($d -lt 50000){throw "DLL too small: $d"}
+          if($i -lt 5000){throw "Injector too small: $i"}
+          if($p -lt 10000){throw "Prep utility too small: $p"}
+          Write-Host "V103_3_DLL_BYTES=$d PREP_BYTES=$p"
+          Write-Host 'PLUTOTEAMRUNTIME_V103_3_X86_BUILD_PACKAGE=PASS'
+
+      - name: Upload v103.3 rollback recorder runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeamRuntime-v103.3-X86-V102-Rollback-Delayed-Recorder
+          path: artifact_v103_3
+          if-no-files-found: error
+          compression-level: 9
