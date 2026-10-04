@@ -1,0 +1,131 @@
+name: aPlutoTeamRuntime v101 x86 Ally-Visible Recognition
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare v101 ally-visible runtime source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git minhook
+          Expand-Archive -Path 'aPlutoTeamRuntime_X86AllyVisibleRecognition_v101.zip' -DestinationPath 'overlay_v101' -Force
+          Copy-Item -Path 'overlay_v101\*' -Destination 'src' -Recurse -Force
+
+          $resident='src\plutoscr_x86\PlutoSCRX86TeamRuntimeV101.cpp'
+          $inj='src\PlutoSCRX86Inject.cpp'
+          if(!(Test-Path $resident)){throw 'PlutoSCRX86TeamRuntimeV101.cpp missing'}
+          if(!(Test-Path $inj)){throw 'PlutoSCRX86Inject.cpp missing'}
+          $rs=Get-Content $resident -Raw
+
+          if($rs -notmatch 'projectRealPlayerRelations'){throw 'real SCR relation bridge missing'}
+          if($rs -notmatch '58692u'){throw 'SCR alliance matrix offset missing'}
+          if($rs -notmatch 'profile_bullet\.live_refresh=TRANSIENT_RETRY_SKIP'){throw 'v99 bullet retry missing'}
+          if($rs -notmatch 'bulletRefreshFailStreak<8'){throw 'v99 bounded bullet retry missing'}
+          if($rs -notmatch 'cunit_snapshot=SHADOW_COUNT_MISMATCH_TRANSIENT_RETRY_SKIP'){throw 'v99 CUnit retry missing'}
+          if($rs -notmatch 'cunitRefreshFailStreak<8'){throw 'v99 bounded CUnit retry missing'}
+          if($rs -notmatch 'scr_command_translation=PASS'){throw 'verified command translation missing'}
+          if($rs -notmatch 'scr_command_sink=ARMED_GAME_THREAD_ONE_FRAME_DELAY'){throw 'verified game-thread send missing'}
+
+          if($rs -notmatch 'TEAM_RUNTIME_MODE=ALLY_VISIBLE_RECOGNITION'){throw 'mode marker missing'}
+          if($rs -notmatch 'TEAM_RUNTIME_RELATION_SOURCE=SCR_GAME_ALLIANCES_58692'){throw 'relation marker missing'}
+          if($rs -notmatch 'TEAM_RUNTIME_CUNIT_OWNER_OFFSET=0x4C'){throw 'owner marker missing'}
+          if($rs -notmatch 'TEAM_RUNTIME_MODEL_OWNER_ENCODING=ORIGINAL_3WAY_NOT_YET_4WAY'){throw '3-way limit marker missing'}
+          if($rs -notmatch 'TEAM_RUNTIME_CUNIT_LIST=ALLY_VISIBLE_FULL_CHAIN'){throw 'full chain marker missing'}
+          if($rs -notmatch 'g_teamCompatLastAllyVisible'){throw 'ally visible counter missing'}
+          if($rs -notmatch 'TEAM_RUNTIME_ALLY_CUNIT relation=ALLY'){throw 'ally sample logger missing'}
+          if($rs -notmatch 'TEAM_RUNTIME_ALLY_TARGET_BLOCK'){throw 'ally target safety missing'}
+          if($rs -match 'ALLY_OPAQUE'){throw 'obsolete ally-opaque mode remains'}
+          if($rs -match 'g_teamCompatLastAllyHidden'){throw 'obsolete ally-hidden code remains'}
+          if($rs -match 'TEAMCOMPAT_LIST tag='){throw 'filtered CUnit list code remains'}
+
+          Write-Host 'PLUTOTEAMRUNTIME_V101_SOURCE_INVARIANTS=PASS'
+
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/chan22222/Pluto-AI-Starcraft-Remaster/44736dd754c9a07fb8efc6412f138fb6607bcd77/src/pluto_bindings.h' -OutFile 'src\plutoscr_x86\pluto_bindings.h'
+          if(!(Test-Path 'src\plutoscr_x86\pluto_bindings.h')){throw 'pluto_bindings.h download failed'}
+          if(!(Test-Path 'minhook\include\MinHook.h')){throw 'MinHook clone failed'}
+
+          Get-ChildItem 'src' -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+
+          $svn='src\bwapi\BWAPILIB\Source\svnrev.h'
+          Set-Content $svn '#pragma once' -Encoding ASCII
+          Add-Content $svn '#define SVN_REV 0' -Encoding ASCII
+          Add-Content $svn '#define BUILD_DEBUG 0' -Encoding ASCII
+          Write-Host 'PLUTOTEAMRUNTIME_V101_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if(!(Test-Path $vw)){throw 'vswhere missing'}
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' |
+            Where-Object {$_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\'} |
+            Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+          Write-Host 'PLUTOTEAMRUNTIME_V101_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v101 TeamRuntime
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v101.ps1
+
+      - name: Assemble and verify v101 runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'artifact_v101' -Force | Out-Null
+          Copy-Item 'build_v101\PlutoSCRX86TeamRuntimeV101.dll' 'artifact_v101\PlutoSCRX86TeamRuntimeV101.dll'
+          Copy-Item 'build_v101\PlutoSCRX86Inject.exe' 'artifact_v101\PlutoSCRX86Inject.exe'
+          foreach($n in @('RUN_PLUTO_TEAMRUNTIME_X86_V101.cmd','README_TEAMRUNTIME_V101.txt')){
+            $f=Get-ChildItem 'src' -Recurse -File -Filter $n | Select-Object -First 1
+            if(!$f){throw "missing package file: $n"}
+            Copy-Item $f.FullName 'artifact_v101'
+          }
+
+          foreach($f in @('artifact_v101\PlutoSCRX86TeamRuntimeV101.dll','artifact_v101\PlutoSCRX86Inject.exe')){
+            $b=[IO.File]::ReadAllBytes((Resolve-Path $f))
+            $pe=[BitConverter]::ToInt32($b,0x3c)
+            $m=[BitConverter]::ToUInt16($b,$pe+4)
+            Write-Host ("PE_MACHINE {0} 0x{1:X4}" -f $f,$m)
+            if($m -ne 0x014c){throw "non-x86 output: $f"}
+          }
+
+          $d=(Get-Item 'artifact_v101\PlutoSCRX86TeamRuntimeV101.dll').Length
+          $e=(Get-Item 'artifact_v101\PlutoSCRX86Inject.exe').Length
+          if($d -lt 50000){throw "DLL too small: $d"}
+          if($e -lt 5000){throw "Injector too small: $e"}
+          Write-Host 'PLUTOTEAMRUNTIME_V101_X86_BUILD_PACKAGE=PASS'
+
+      - name: Upload v101 in-game ally-visible runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeamRuntime-v101-X86-Ally-Visible-Recognition
+          path: artifact_v101
+          if-no-files-found: error
+          compression-level: 9
