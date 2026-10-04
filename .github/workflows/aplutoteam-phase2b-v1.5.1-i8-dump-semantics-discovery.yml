@@ -1,0 +1,83 @@
+name: aPlutoTeam Phase2B v1.5.1 I8 Dump Semantics Discovery
+
+on:
+  workflow_dispatch:
+
+jobs:
+  discover:
+    runs-on: windows-latest
+    timeout-minutes: 12
+
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+      PLUTO_WEIGHTS_SHA256: 00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare v1.5.1 source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          if (-not (Test-Path "pluto-team")) { throw "pluto-team missing" }
+          if (-not (Test-Path "pluto-team\discover_i8_dump_semantics_v1_5_1.py")) {
+            if (-not (Test-Path "pluto-team\aPlutoTeam_Phase2B_v1_5_1.zip")) { throw "v1.5.1 ZIP missing" }
+            Expand-Archive "pluto-team\aPlutoTeam_Phase2B_v1_5_1.zip" "pluto-team" -Force
+          }
+          New-Item -ItemType Directory -Force "pluto-team\official-release" | Out-Null
+          New-Item -ItemType Directory -Force "pluto-team\phase2b-v1.5.1-out" | Out-Null
+          Write-Host "PHASE2B_V1_5_1_SOURCE_READY=YES"
+
+      - name: Download and verify official Pluto
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $zip="$PWD\pluto-team\official-release\pluto.zip"
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o $zip $env:PLUTO_RELEASE_URL
+          if ($LASTEXITCODE -ne 0) { throw "curl failed" }
+          $sha=(Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($sha -ne $env:PLUTO_RELEASE_SHA256) { throw "release SHA mismatch $sha" }
+          Expand-Archive $zip "$PWD\pluto-team\official-release\unpacked" -Force
+          $w="$PWD\pluto-team\official-release\unpacked\pluto\pluto_weights.bin"
+          $e="$PWD\pluto-team\official-release\unpacked\pluto\pluto_infer.exe"
+          if (-not (Test-Path $w) -or -not (Test-Path $e)) { throw "official runtime missing" }
+          $wsha=(Get-FileHash -Algorithm SHA256 $w).Hash.ToLower()
+          if ($wsha -ne $env:PLUTO_WEIGHTS_SHA256) { throw "weights SHA mismatch $wsha" }
+          "PLUTO_WEIGHTS=$w" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PLUTO_INFER=$e" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "OFFICIAL_RELEASE_READY=PASS"
+
+      - name: Discover BWRL_I8_DUMP semantics
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          Push-Location pluto-team
+          python discover_i8_dump_semantics_v1_5_1.py `
+            --exe "$env:PLUTO_INFER" `
+            --blob "$env:PLUTO_WEIGHTS" `
+            --out "phase2b-v1.5.1-out"
+          Pop-Location
+
+      - name: Remove official runtime
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path "pluto-team\official-release") {
+            Remove-Item -Recurse -Force "pluto-team\official-release"
+          }
+
+      - name: Upload discovery diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase2B-v1.5.1-I8-Dump-Semantics-Discovery
+          path: pluto-team/phase2b-v1.5.1-out
+          if-no-files-found: error
+          compression-level: 9
