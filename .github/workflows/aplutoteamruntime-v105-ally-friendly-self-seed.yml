@@ -1,0 +1,239 @@
+name: aPlutoTeamRuntime v105 x86 Ally-Friendly Self Seed
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare v105 from proven v104 source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git minhook
+
+          $zip='pluto-team\aPlutoTeamRuntime_X86LegacyShadowOwnerMatch_v104.zip'
+          if(!(Test-Path $zip)){throw "missing proven v104 source ZIP: $zip"}
+          Expand-Archive -Path $zip -DestinationPath 'overlay_v105' -Force
+          Copy-Item -Path 'overlay_v105\*' -Destination 'src' -Recurse -Force
+
+          $resident='src\plutoscr_x86\PlutoSCRX86TeamRuntimeV104.cpp'
+          $prep='src\plutoscr_x86\PlutoTeamRuntimePrepV104.cpp'
+          if(!(Test-Path $resident) -or !(Test-Path $prep)){throw 'v104 resident/prep source missing'}
+
+          # Runtime mechanics stay v104; only make the diagnostic marker truthful for v105.
+          $rs=Get-Content $resident -Raw
+          $old='TEAM_RUNTIME_TEAM4_SEED=ALLY_EQUALS_ENEMY_INITIAL_WEIGHTS'
+          $new='TEAM_RUNTIME_TEAM4_SEED=ALLY_FRIENDLY_SELF_SEED_V105'
+          if($rs -notmatch [regex]::Escape($old)){throw 'v104 ally seed marker missing'}
+          $rs=$rs.Replace($old,$new)
+          Set-Content $resident $rs -Encoding UTF8
+
+          # Native Windows PowerShell patcher: after the proven v104 prep expands owner_emb to [4,256],
+          # copy SELF row 0 onto ALLY row 1. ENEMY row 2 and NEUTRAL row 3 remain unchanged.
+          @'
+          param([Parameter(Mandatory=$true)][string]$Weights)
+          $ErrorActionPreference='Stop'
+          $p=(Resolve-Path $Weights).Path
+          [byte[]]$raw=[IO.File]::ReadAllBytes($p)
+          if($raw.Length -lt 64){throw 'PLWB too small'}
+          $magic=[Text.Encoding]::ASCII.GetString($raw,0,4)
+          if($magic -ne 'PLWB'){throw 'not PLWB'}
+          $ver=[BitConverter]::ToUInt32($raw,4)
+          if($ver -ne 1){throw "unsupported PLWB version $ver"}
+          [UInt64]$hlen=[BitConverter]::ToUInt64($raw,8)
+          $json=[Text.Encoding]::UTF8.GetString($raw,16,[int]$hlen)
+          $hdr=$json | ConvertFrom-Json
+          [Int64]$total=[Int64]$hdr.total_bytes
+          [Int64]$base=$raw.LongLength-$total
+          if($base -lt 16){throw "bad PLWB base $base"}
+          $t=$hdr.tensors | Where-Object {$_.name -eq 'owner_emb.weight'} | Select-Object -First 1
+          if($null -eq $t){throw 'owner_emb.weight missing'}
+          if([int]$t.shape[0] -ne 4 -or [int]$t.shape[1] -ne 256){throw "owner shape must be [4,256], got $($t.shape -join ',')"}
+          if([string]$t.dtype -ne 'float32'){throw "owner dtype must be float32, got $($t.dtype)"}
+          [Int64]$off=$base+[Int64]$t.offset
+          [int]$row=1024
+          if($off+4*$row -gt $raw.LongLength){throw 'owner data out of range'}
+          [byte[]]$enemyBefore=New-Object byte[] $row
+          [byte[]]$neutralBefore=New-Object byte[] $row
+          [Array]::Copy($raw,$off+2*$row,$enemyBefore,0,$row)
+          [Array]::Copy($raw,$off+3*$row,$neutralBefore,0,$row)
+          [Array]::Copy($raw,$off,$raw,$off+$row,$row)
+          [IO.File]::WriteAllBytes($p,$raw)
+
+          [byte[]]$check=[IO.File]::ReadAllBytes($p)
+          for($i=0;$i -lt $row;$i++){
+            if($check[$off+$i] -ne $check[$off+$row+$i]){throw "ALLY!=SELF at byte $i"}
+            if($check[$off+2*$row+$i] -ne $enemyBefore[$i]){throw "ENEMY changed at byte $i"}
+            if($check[$off+3*$row+$i] -ne $neutralBefore[$i]){throw "NEUTRAL changed at byte $i"}
+          }
+          $allyEqualsEnemy=$true
+          for($i=0;$i -lt $row;$i++){
+            if($check[$off+$row+$i] -ne $check[$off+2*$row+$i]){$allyEqualsEnemy=$false;break}
+          }
+          if($allyEqualsEnemy){throw 'ALLY still equals ENEMY after friendly patch'}
+          Write-Host 'TEAM4_V105_OWNER_MAPPING=SELF0_ALLY1_ENEMY2_NEUTRAL3'
+          Write-Host 'TEAM4_V105_ALLY_SEED=SELF_FRIENDLY_UNCONTROLLABLE_BY_ACTOR_MASK'
+          Write-Host 'TEAM4_V105_ALLY_FRIENDLY_SEED=PASS'
+          '@ | Set-Content 'src\plutoscr_x86\PATCH_ALLY_FRIENDLY_V105.ps1' -Encoding UTF8
+
+          # Build a v105 launcher by inserting the friendly patch immediately after v104 prep.
+          $run104=Get-ChildItem 'src' -Recurse -File -Filter 'RUN_PLUTO_TEAMRUNTIME_X86_V104.cmd' | Select-Object -First 1
+          if(!$run104){throw 'v104 run script missing'}
+          $lines=Get-Content $run104.FullName
+          $out=New-Object System.Collections.Generic.List[string]
+          $inserted=$false
+          foreach($line in $lines){
+            $out.Add($line)
+            if(!$inserted -and $line -match 'PlutoTeamRuntimePrepV104\.exe'){
+              $out.Add('if errorlevel 1 exit /b 1')
+              $out.Add('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0PATCH_ALLY_FRIENDLY_V105.ps1" -Weights "%~dp0pluto\pluto_weights.bin"')
+              $out.Add('if errorlevel 1 exit /b 1')
+              $out.Add('echo TEAM4_V105_ALLY_FRIENDLY_SEED=PASS')
+              $inserted=$true
+            }
+          }
+          if(!$inserted){throw 'could not insert v105 friendly patch after prep'}
+          Set-Content 'src\plutoscr_x86\RUN_PLUTO_TEAMRUNTIME_X86_V105.cmd' $out -Encoding ASCII
+
+          @'
+          Pluto-Team Runtime v105 — Ally-Friendly Self Seed
+
+          Goal: make original Pluto stop semantically treating allied units/buildings as enemies.
+
+          Runtime core: proven v104 legacy-shadow exact-observation owner matcher.
+          Owner vocabulary remains: 0 SELF, 1 ALLY, 2 ENEMY, 3 NEUTRAL.
+
+          v105 semantic seed:
+            SELF    = original SELF embedding
+            ALLY    = copy of original SELF embedding (friendly seed)
+            ENEMY   = original OTHER/enemy embedding
+            NEUTRAL = original NEUTRAL embedding
+
+          IMPORTANT:
+          - Allies remain a distinct owner category (1).
+          - actor_mask still prevents Pluto from commanding allied units.
+          - v104 direct ally-target safety block remains enabled.
+          - Therefore an ally is presented as a friendly but non-controllable unit/building.
+          - This is an intentional behavioral Team test, not a claim that cooperative training is finished.
+
+          Test target:
+          1) allied Hydralisks approaching Pluto forces should no longer provoke enemy-like Stim/Defensive Matrix reactions merely because they are allied units;
+          2) Pluto should not issue direct hostile targets at allies;
+          3) when enemies attack an allied base/workers near Pluto's forces, observe whether original Pluto now reacts as it would to friendly assets under threat.
+
+          Run: RUN_PLUTO_TEAMRUNTIME_X86_V105.cmd
+          '@ | Set-Content 'src\plutoscr_x86\README_TEAMRUNTIME_V105.txt' -Encoding UTF8
+
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/chan22222/Pluto-AI-Starcraft-Remaster/44736dd754c9a07fb8efc6412f138fb6607bcd77/src/pluto_bindings.h' -OutFile 'src\plutoscr_x86\pluto_bindings.h'
+          if(!(Test-Path 'minhook\include\MinHook.h')){throw 'MinHook missing'}
+
+          Get-ChildItem 'src' -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+          $svn='src\bwapi\BWAPILIB\Source\svnrev.h'
+          Set-Content $svn '#pragma once' -Encoding ASCII
+          Add-Content $svn '#define SVN_REV 0' -Encoding ASCII
+          Add-Content $svn '#define BUILD_DEBUG 0' -Encoding ASCII
+          Write-Host 'PLUTOTEAMRUNTIME_V105_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' |
+            Where-Object {$_.FullName -match '\\Bin\\MSBuild\.exe$' -and $_.FullName -notmatch '\\amd64\\'} |
+            Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+          Write-Host 'PLUTOTEAMRUNTIME_V105_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link proven v104 core with v105 marker
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v104.ps1
+
+      - name: Validate real official Pluto plus v105 friendly owner seed
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'runtime_test\pluto' -Force | Out-Null
+          New-Item -ItemType Directory 'official_unpack' -Force | Out-Null
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o 'official_pluto.zip' $env:PLUTO_RELEASE_URL
+          if($LASTEXITCODE -ne 0){throw 'official download failed'}
+          $sha=(Get-FileHash -Algorithm SHA256 'official_pluto.zip').Hash.ToLower()
+          if($sha -ne $env:PLUTO_RELEASE_SHA256){throw "release SHA mismatch $sha"}
+          Expand-Archive 'official_pluto.zip' 'official_unpack' -Force
+          Copy-Item 'official_unpack\pluto\pluto_infer.exe' 'runtime_test\pluto\pluto_infer.exe'
+          Copy-Item 'official_unpack\pluto\pluto_weights.bin' 'runtime_test\pluto\pluto_weights.bin'
+
+          & '.\build_v104\PlutoTeamRuntimePrepV104.exe' "$PWD\runtime_test"
+          if($LASTEXITCODE -ne 0){throw "v104 prep failed: $LASTEXITCODE"}
+          powershell -NoProfile -ExecutionPolicy Bypass -File '.\src\plutoscr_x86\PATCH_ALLY_FRIENDLY_V105.ps1' -Weights '.\runtime_test\pluto\pluto_weights.bin'
+          if($LASTEXITCODE -ne 0){throw 'v105 friendly owner patch failed'}
+
+          $b=[IO.File]::ReadAllBytes((Resolve-Path 'runtime_test\pluto\pluto_infer.exe'))
+          $sig=($b[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig -ne '41B904000000'){throw "owner gate is not 4-way: $sig"}
+          Write-Host 'PLUTOTEAMRUNTIME_V105_ENGINE_4WAY=PASS'
+          Write-Host 'PLUTOTEAMRUNTIME_V105_FRIENDLY_OWNER_SEED=PASS'
+
+          Remove-Item -Recurse -Force 'runtime_test','official_unpack'
+          Remove-Item -Force 'official_pluto.zip'
+
+      - name: Assemble v105 runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'artifact_v105' -Force | Out-Null
+          Copy-Item 'build_v104\PlutoSCRX86TeamRuntimeV104.dll' 'artifact_v105\PlutoSCRX86TeamRuntimeV105.dll'
+          Copy-Item 'build_v104\PlutoSCRX86Inject.exe' 'artifact_v105\PlutoSCRX86Inject.exe'
+          Copy-Item 'build_v104\PlutoTeamRuntimePrepV104.exe' 'artifact_v105\PlutoTeamRuntimePrepV104.exe'
+          Copy-Item 'src\plutoscr_x86\RUN_PLUTO_TEAMRUNTIME_X86_V105.cmd' 'artifact_v105\RUN_PLUTO_TEAMRUNTIME_X86_V105.cmd'
+          Copy-Item 'src\plutoscr_x86\PATCH_ALLY_FRIENDLY_V105.ps1' 'artifact_v105\PATCH_ALLY_FRIENDLY_V105.ps1'
+          Copy-Item 'src\plutoscr_x86\README_TEAMRUNTIME_V105.txt' 'artifact_v105\README_TEAMRUNTIME_V105.txt'
+
+          foreach($n in @('trajectory_v103.py','PACK_PLUTO_TEAM_TRAINING_DATA_V104.cmd')){
+            $f=Get-ChildItem 'src' -Recurse -File -Filter $n | Select-Object -First 1
+            if($f){Copy-Item $f.FullName 'artifact_v105'}
+          }
+          $restore=Get-ChildItem 'src' -Recurse -File -Filter 'RESTORE_PLUTO_OFFICIAL_V104.cmd' | Select-Object -First 1
+          if($restore){Copy-Item $restore.FullName 'artifact_v105\RESTORE_PLUTO_OFFICIAL_V105.cmd'}
+
+          # v104 injector/run scripts may reference the original DLL filename. Keep an alias as well.
+          Copy-Item 'build_v104\PlutoSCRX86TeamRuntimeV104.dll' 'artifact_v105\PlutoSCRX86TeamRuntimeV104.dll'
+
+          foreach($f in @('artifact_v105\PlutoSCRX86TeamRuntimeV104.dll','artifact_v105\PlutoSCRX86Inject.exe','artifact_v105\PlutoTeamRuntimePrepV104.exe')){
+            if(!(Test-Path $f)){throw "missing artifact file $f"}
+          }
+          Write-Host 'PLUTOTEAMRUNTIME_V105_PACKAGE=PASS'
+
+      - name: Upload v105 ally-friendly runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeamRuntime-v105-X86-Ally-Friendly-Self-Seed
+          path: artifact_v105
+          if-no-files-found: error
+          compression-level: 9
