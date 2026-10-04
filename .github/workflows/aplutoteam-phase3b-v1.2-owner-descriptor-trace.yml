@@ -1,0 +1,97 @@
+name: aPlutoTeam Phase3B v1.2 Owner Descriptor Trace
+
+on:
+  workflow_dispatch:
+
+jobs:
+  trace:
+    runs-on: windows-latest
+    timeout-minutes: 18
+
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+      PLUTO_WEIGHTS_SHA256: 00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Phase3B v1.2
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $zip="pluto-team\aPlutoTeam_Phase3B_v1_2_OwnerDescriptorTrace.zip"
+          if (-not (Test-Path $zip)) { throw "missing $zip" }
+          New-Item -ItemType Directory -Force "pluto-team\phase3b-v1.2" | Out-Null
+          Expand-Archive $zip "pluto-team\phase3b-v1.2" -Force
+          python -m pip install pefile
+          python -m py_compile `
+            "pluto-team\phase3b-v1.2\expand_owner_plwb_4way.py" `
+            "pluto-team\phase3b-v1.2\trace_owner_descriptor.py"
+          New-Item -ItemType Directory -Force "pluto-team\phase3b-v1.2-out" | Out-Null
+          New-Item -ItemType Directory -Force "pluto-team\official-release" | Out-Null
+          Write-Host "PHASE3B_V1_2_SOURCE_READY=PASS"
+
+      - name: Download and verify official Pluto
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $zip="$PWD\pluto-team\official-release\pluto.zip"
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o $zip $env:PLUTO_RELEASE_URL
+          if ($LASTEXITCODE -ne 0) { throw "curl failed" }
+          $sha=(Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($sha -ne $env:PLUTO_RELEASE_SHA256) { throw "release SHA mismatch $sha" }
+          Expand-Archive $zip "$PWD\pluto-team\official-release\unpacked" -Force
+          $w="$PWD\pluto-team\official-release\unpacked\pluto\pluto_weights.bin"
+          $e="$PWD\pluto-team\official-release\unpacked\pluto\pluto_infer.exe"
+          if (-not (Test-Path $w) -or -not (Test-Path $e)) { throw "official runtime missing" }
+          $wsha=(Get-FileHash -Algorithm SHA256 $w).Hash.ToLower()
+          if ($wsha -ne $env:PLUTO_WEIGHTS_SHA256) { throw "weights SHA mismatch $wsha" }
+          "PLUTO_WEIGHTS=$w" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PLUTO_INFER=$e" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "OFFICIAL_RELEASE_READY=PASS"
+
+      - name: Build four-way owner seed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $team4="$PWD\pluto-team\phase3b-v1.2-out\pluto_weights_team4_seed.bin"
+          python "pluto-team\phase3b-v1.2\expand_owner_plwb_4way.py" "$env:PLUTO_WEIGHTS" "$team4"
+          "PLUTO_TEAM4=$team4" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Trace owner descriptor and test isolated candidates
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          python "pluto-team\phase3b-v1.2\trace_owner_descriptor.py" `
+            --exe "$env:PLUTO_INFER" `
+            --official "$env:PLUTO_WEIGHTS" `
+            --team4 "$env:PLUTO_TEAM4" `
+            --out "pluto-team\phase3b-v1.2-out"
+
+      - name: Remove official runtime, large seed, temporary EXEs
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path "pluto-team\official-release") {
+            Remove-Item -Recurse -Force "pluto-team\official-release"
+          }
+          Get-ChildItem "pluto-team\phase3b-v1.2-out" -Filter "*.exe" -ErrorAction SilentlyContinue | Remove-Item -Force
+          if (Test-Path "pluto-team\phase3b-v1.2-out\pluto_weights_team4_seed.bin") {
+            Remove-Item -Force "pluto-team\phase3b-v1.2-out\pluto_weights_team4_seed.bin"
+          }
+
+      - name: Upload descriptor diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase3B-v1.2-Owner-Descriptor-Trace
+          path: pluto-team/phase3b-v1.2-out
+          if-no-files-found: error
+          compression-level: 9
