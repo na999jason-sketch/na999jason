@@ -1,0 +1,151 @@
+name: aPlutoTeam Phase2C v1.3 Official INT8 vs FP32 Sequence
+
+on:
+  workflow_dispatch:
+
+jobs:
+  isolate:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+      PLUTO_INFER_SHA256: ad880d8be52a6ef03893fa20644b6627e04fcd55e030178c6d52486b82340f2b
+      PLUTO_WEIGHTS_SHA256: 00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Phase2C v1.3 source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip='pluto-team\aPlutoTeam_Phase2C_v1_3_DualBackendSequence.zip'
+          if(!(Test-Path $zip)){throw "missing $zip"}
+          Remove-Item -Recurse -Force 'pluto-team\phase2c-v1.3' -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force 'pluto-team\phase2c-v1.3' | Out-Null
+          Expand-Archive -Path $zip -DestinationPath 'pluto-team\phase2c-v1.3' -Force
+          foreach($f in @('phase2c_v1_3_dual_backend_sequence.py','make_fp32_plwb_generic.py','pluto_trunk.py','plwb.py','expand_owner_plwb_4way.py','sequence\manifest.json')){
+            if(!(Test-Path (Join-Path 'pluto-team\phase2c-v1.3' $f))){throw "missing package file $f"}
+          }
+          Write-Host 'PHASE2C_V1_3_SOURCE_READY=PASS'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Validate packaged sequence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Push-Location 'pluto-team\phase2c-v1.3'
+          @'
+          import json, hashlib
+          from pathlib import Path
+          p=Path('sequence'); m=json.loads((p/'manifest.json').read_text(encoding='utf-8'))
+          assert len(m['items']) == 64
+          for x in m['items']:
+              b=(p/x['request_file']).read_bytes()
+              assert hashlib.sha256(b).hexdigest() == x['request_sha256']
+          print('PHASE2C_V1_3_SEQUENCE_PACKAGE=PASS')
+          '@ | python -
+          Pop-Location
+
+      - name: Download exact official Pluto release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'pluto-team\phase2c-v1.3').Path
+          New-Item -ItemType Directory -Force "$root\official" | Out-Null
+          $zip="$root\official\pluto.zip"
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o $zip $env:PLUTO_RELEASE_URL
+          if($LASTEXITCODE -ne 0){throw 'official release download failed'}
+          if((Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower() -ne $env:PLUTO_RELEASE_SHA256){throw 'release SHA mismatch'}
+          Expand-Archive $zip "$root\official\unpacked" -Force
+          $exe="$root\official\unpacked\pluto\pluto_infer.exe"
+          $weights="$root\official\unpacked\pluto\pluto_weights.bin"
+          if((Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower() -ne $env:PLUTO_INFER_SHA256){throw 'infer SHA mismatch'}
+          if((Get-FileHash -Algorithm SHA256 $weights).Hash.ToLower() -ne $env:PLUTO_WEIGHTS_SHA256){throw 'weights SHA mismatch'}
+          "OFFICIAL_EXE=$exe" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "OFFICIAL_WEIGHTS=$weights" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'PHASE2C_V1_3_OFFICIAL_RELEASE=PASS'
+
+      - name: Build patched 4-way INT8 engine and weights
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'pluto-team\phase2c-v1.3').Path
+          $w4="$root\official\pluto_weights_team4seed_int8.bin"
+          $e4="$root\official\pluto_infer_team4.exe"
+          Push-Location $root
+          python .\expand_owner_plwb_4way.py $env:OFFICIAL_WEIGHTS $w4
+          if($LASTEXITCODE -ne 0){throw '4-way INT8 PLWB build failed'}
+          Pop-Location
+          Copy-Item $env:OFFICIAL_EXE $e4 -Force
+          $b=[IO.File]::ReadAllBytes($e4)
+          $sig=($b[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig -ne '41B903000000'){throw "unexpected owner gate $sig"}
+          $b[59203]=4
+          [IO.File]::WriteAllBytes($e4,$b)
+          $sig2=(([IO.File]::ReadAllBytes($e4))[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig2 -ne '41B904000000'){throw "4-way owner gate patch failed $sig2"}
+          "TEAM4_EXE=$e4" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "TEAM4_INT8=$w4" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'PHASE2C_V1_3_TEAM4_INT8=PASS'
+
+      - name: Build 4-way all-FP32 PLWB
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'pluto-team\phase2c-v1.3').Path
+          $fp="$root\official\pluto_weights_team4seed_fp32.bin"
+          Push-Location $root
+          python .\make_fp32_plwb_generic.py --input $env:TEAM4_INT8 --output $fp --manifest .\out_fp32_manifest.json
+          if($LASTEXITCODE -ne 0){throw 'team4 FP32 PLWB build failed'}
+          Pop-Location
+          "TEAM4_FP32=$fp" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'PHASE2C_V1_3_TEAM4_FP32=PASS'
+
+      - name: Run dual-backend persistent sequence isolation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'pluto-team\phase2c-v1.3').Path
+          Push-Location $root
+          New-Item -ItemType Directory -Force 'out' | Out-Null
+          Copy-Item .\out_fp32_manifest.json .\out\fp32_blob_manifest.json -Force
+          python .\phase2c_v1_3_dual_backend_sequence.py `
+            --exe $env:TEAM4_EXE `
+            --int8-weights $env:TEAM4_INT8 `
+            --fp32-weights $env:TEAM4_FP32 `
+            --sequence .\sequence `
+            --out .\out
+          if($LASTEXITCODE -ne 0){throw "Phase2C v1.3 failed: $LASTEXITCODE"}
+          Get-Content .\out\phase2c_v1_3_summary.txt
+          Pop-Location
+
+      - name: Remove temporary official binaries and large blobs
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force 'pluto-team\phase2c-v1.3\official' -ErrorAction SilentlyContinue
+          Remove-Item -Force 'pluto-team\phase2c-v1.3\out_fp32_manifest.json' -ErrorAction SilentlyContinue
+          Write-Host 'PHASE2C_V1_3_TEMP_BLOBS_REMOVED=YES'
+
+      - name: Upload Phase2C v1.3 diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase2C-v1.3-Official-INT8-vs-FP32-Sequence
+          path: pluto-team/phase2c-v1.3/out
+          if-no-files-found: error
+          compression-level: 9
