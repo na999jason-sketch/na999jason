@@ -1,0 +1,162 @@
+name: aPlutoTeam Phase2C v1 Real-Trajectory Parity
+
+on:
+  workflow_dispatch:
+
+jobs:
+  parity:
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+      PLUTO_INFER_SHA256: ad880d8be52a6ef03893fa20644b6627e04fcd55e030178c6d52486b82340f2b
+      PLUTO_WEIGHTS_SHA256: 00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Phase2C v1 source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip='pluto-team\aPlutoTeam_Phase2C_v1_RealTrajectoryParity.zip'
+          if(!(Test-Path $zip)){throw "missing $zip"}
+          Remove-Item -Recurse -Force 'pluto-team\phase2c-v1' -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force 'pluto-team\phase2c-v1' | Out-Null
+          Expand-Archive -Path $zip -DestinationPath 'pluto-team\phase2c-v1' -Force
+          foreach($f in @('phase2c_real_request_parity.py','pluto_trunk.py','plwb.py','expand_owner_plwb_4way.py','README.md','probes\manifest.json')){
+            if(!(Test-Path (Join-Path 'pluto-team\phase2c-v1' $f))){throw "missing package file $f"}
+          }
+          Write-Host 'PHASE2C_V1_SOURCE_READY=PASS'
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          @'
+          import numpy, torch
+          print('numpy', numpy.__version__)
+          print('torch', torch.__version__)
+          print('threads', torch.get_num_threads())
+          '@ | python -
+
+      - name: Validate packaged real requests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Push-Location 'pluto-team\phase2c-v1'
+          @'
+          import hashlib, json
+          from pathlib import Path
+          from phase2c_real_request_parity import parse_request, collapse_team4_request_to_official3
+          p=Path('probes')
+          m=json.loads((p/'manifest.json').read_text(encoding='utf-8'))
+          assert len(m['probes']) == 8
+          for x in m['probes']:
+              raw=(p/x['request_file']).read_bytes()
+              assert hashlib.sha256(raw).hexdigest()==x['request_sha256']
+              q=parse_request(raw)
+              assert q['n']==x['n']
+              collapsed=parse_request(collapse_team4_request_to_official3(raw))
+              c=q['owner_counts']; d=collapsed['owner_counts']
+              # N includes Pluto's reserved null row; manifest semantic counts exclude it.
+              assert d['0']==c['0']
+              assert d['1']==c['1']+c['2']
+              assert d['2']==c['3']
+              assert d['3']==0
+          print('PHASE2C_REAL_REQUEST_PACKAGE_VALIDATION=PASS')
+          '@ | python -
+          Pop-Location
+
+      - name: Download exact official Pluto release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force 'pluto-team\phase2c-v1\official' | Out-Null
+          $zip='pluto-team\phase2c-v1\official\pluto.zip'
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o $zip $env:PLUTO_RELEASE_URL
+          if($LASTEXITCODE -ne 0){throw 'official release download failed'}
+          $sha=(Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if($sha -ne $env:PLUTO_RELEASE_SHA256){throw "release SHA mismatch $sha"}
+          Expand-Archive $zip 'pluto-team\phase2c-v1\official\unpacked' -Force
+          $exe='pluto-team\phase2c-v1\official\unpacked\pluto\pluto_infer.exe'
+          $weights='pluto-team\phase2c-v1\official\unpacked\pluto\pluto_weights.bin'
+          if((-not (Test-Path $exe)) -or (-not (Test-Path $weights))){throw 'official infer/weights missing'}
+          $esha=(Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower()
+          $wsha=(Get-FileHash -Algorithm SHA256 $weights).Hash.ToLower()
+          if($esha -ne $env:PLUTO_INFER_SHA256){throw "infer SHA mismatch $esha"}
+          if($wsha -ne $env:PLUTO_WEIGHTS_SHA256){throw "weights SHA mismatch $wsha"}
+          "OFFICIAL_EXE=$((Resolve-Path $exe).Path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "OFFICIAL_WEIGHTS=$((Resolve-Path $weights).Path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'PHASE2C_OFFICIAL_RELEASE_VERIFIED=PASS'
+
+      - name: Build policy-preserving 4-way weights and patched engine
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'pluto-team\phase2c-v1').Path
+          $w4=Join-Path $root 'official\pluto_weights_team4seed.bin'
+          $e4=Join-Path $root 'official\pluto_infer_team4.exe'
+          Push-Location $root
+          python .\expand_owner_plwb_4way.py $env:OFFICIAL_WEIGHTS $w4
+          if($LASTEXITCODE -ne 0){throw '4-way PLWB build failed'}
+          Pop-Location
+          Copy-Item $env:OFFICIAL_EXE $e4 -Force
+          $b=[IO.File]::ReadAllBytes($e4)
+          $sig=($b[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          Write-Host "PHASE2C_ENGINE_GATE_BEFORE=$sig"
+          if($sig -ne '41B903000000'){throw "unexpected official owner gate bytes $sig"}
+          $b[59203]=4
+          [IO.File]::WriteAllBytes($e4,$b)
+          $b2=[IO.File]::ReadAllBytes($e4)
+          $sig2=($b2[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          Write-Host "PHASE2C_ENGINE_GATE_AFTER=$sig2"
+          if($sig2 -ne '41B904000000'){throw "4-way owner gate patch failed $sig2"}
+          "TEAM4_EXE=$e4" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "TEAM4_WEIGHTS=$w4" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'PHASE2C_FOURWAY_SEED_BUILD=PASS'
+
+      - name: Run real-trajectory official and PyTorch parity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'pluto-team\phase2c-v1').Path
+          Push-Location $root
+          New-Item -ItemType Directory -Force 'out' | Out-Null
+          python .\phase2c_real_request_parity.py `
+            --official-exe $env:OFFICIAL_EXE `
+            --official-weights $env:OFFICIAL_WEIGHTS `
+            --team4-exe $env:TEAM4_EXE `
+            --team4-weights $env:TEAM4_WEIGHTS `
+            --probes .\probes `
+            --out .\out `
+            --coord-mode center01
+          if($LASTEXITCODE -ne 0){throw "Phase2C parity failed: $LASTEXITCODE"}
+          Get-Content .\out\phase2c_v1_summary.txt
+          Pop-Location
+
+      - name: Remove temporary official binaries
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force 'pluto-team\phase2c-v1\official' -ErrorAction SilentlyContinue
+          Write-Host 'PHASE2C_TEMP_OFFICIAL_REMOVED=YES'
+
+      - name: Upload Phase2C v1 diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase2C-v1-Real-Trajectory-Parity
+          path: pluto-team/phase2c-v1/out
+          if-no-files-found: warn
+          compression-level: 9
