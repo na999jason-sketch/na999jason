@@ -1,0 +1,72 @@
+name: aPlutoTeam Phase3A v1.1 Ally Relation Encoder
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'pluto-team/aPlutoTeam_Phase3A_v1_1_AllyRelationEncoder.zip'
+      - '.github/workflows/aplutoteam-phase3a-v1.1-ally-relation-encoder.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Phase3A v1.1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f pluto-team/team_relation/team_relation_encoder.py ]; then
+            test -f pluto-team/aPlutoTeam_Phase3A_v1_1_AllyRelationEncoder.zip
+            unzip -o pluto-team/aPlutoTeam_Phase3A_v1_1_AllyRelationEncoder.zip -d .
+          fi
+          test -f pluto-team/team_relation/team_relation_encoder.py
+          test -f pluto-team/team_relation/test_team_relation_encoder.py
+          test -f pluto-team/team_relation/test_team_relation_encoder.cpp
+          echo "PHASE3A_V1_1_SOURCE_READY=PASS"
+
+      - name: Python relation tests
+        working-directory: pluto-team/team_relation
+        run: |
+          python test_team_relation_encoder.py
+          python selftest_report.py
+
+      - name: C++ relation tests
+        working-directory: pluto-team/team_relation
+        run: |
+          g++ -std=c++17 -O2 -Wall -Wextra -Werror test_team_relation_encoder.cpp -o relation_test
+          ./relation_test | tee team_relation_cpp_report.txt
+
+      - name: Static invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'SCR_GAME_ALLIANCES_OFFSET = 58692' pluto-team/team_relation/team_relation_encoder.py
+          grep -q 'SCR_CUNIT_OWNER_OFFSET = 0x4C' pluto-team/team_relation/team_relation_encoder.py
+          grep -q 'OWNER_SELF = 0' pluto-team/team_relation/team_relation_encoder.py
+          grep -q 'OWNER_ALLY = 1' pluto-team/team_relation/team_relation_encoder.py
+          grep -q 'OWNER_ENEMY = 2' pluto-team/team_relation/team_relation_encoder.py
+          grep -q 'OWNER_NEUTRAL = 3' pluto-team/team_relation/team_relation_encoder.py
+          grep -q 'ally_units_and_buildings=ALLY' pluto-team/team_relation/test_team_relation_encoder.cpp
+          echo 'TEAM_RELATION_STATIC_INVARIANTS=PASS'
+
+      - name: Upload verification artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase3A-v1.1-Ally-Relation-Encoder
+          path: |
+            pluto-team/team_relation/team_relation_report.txt
+            pluto-team/team_relation/team_relation_cpp_report.txt
+            pluto-team/team_relation/README.md
+          if-no-files-found: warn
+          compression-level: 9
