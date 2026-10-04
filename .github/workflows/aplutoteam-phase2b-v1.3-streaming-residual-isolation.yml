@@ -1,0 +1,123 @@
+name: aPlutoTeam Phase2B v1.3 Streaming Residual Isolation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  isolate:
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+      PLUTO_WEIGHTS_SHA256: 00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Phase2B v1.3 source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          if (-not (Test-Path "pluto-team")) { throw "pluto-team missing" }
+          if (-not (Test-Path "pluto-team\probe_official_dual_backend_v1_3.py")) {
+            if (-not (Test-Path "pluto-team\aPlutoTeam_Phase2B_v1_3.zip")) { throw "v1.3 ZIP missing" }
+            Expand-Archive "pluto-team\aPlutoTeam_Phase2B_v1_3.zip" "pluto-team" -Force
+          }
+          New-Item -ItemType Directory -Force "pluto-team\official-release" | Out-Null
+          New-Item -ItemType Directory -Force "pluto-team\phase2b-v1.3-out" | Out-Null
+          Write-Host "PHASE2B_V1_3_SOURCE_READY=YES"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pytest
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          Push-Location pluto-team
+          python -m pytest -q test_phase2b_helpers.py
+          Pop-Location
+
+      - name: Download official Pluto
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          $zip="$PWD\pluto-team\official-release\pluto.zip"
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o $zip $env:PLUTO_RELEASE_URL
+          if ($LASTEXITCODE -ne 0) { throw "curl failed" }
+          $sha=(Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          if ($sha -ne $env:PLUTO_RELEASE_SHA256) { throw "release SHA mismatch $sha" }
+          Expand-Archive $zip "$PWD\pluto-team\official-release\unpacked" -Force
+          $w="$PWD\pluto-team\official-release\unpacked\pluto\pluto_weights.bin"
+          $e="$PWD\pluto-team\official-release\unpacked\pluto\pluto_infer.exe"
+          if (-not (Test-Path $w) -or -not (Test-Path $e)) { throw "official runtime missing" }
+          $wsha=(Get-FileHash -Algorithm SHA256 $w).Hash.ToLower()
+          if ($wsha -ne $env:PLUTO_WEIGHTS_SHA256) { throw "weights SHA mismatch $wsha" }
+          "PLUTO_WEIGHTS=$w" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "PLUTO_INFER=$e" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "OFFICIAL_RELEASE_READY=PASS"
+
+      - name: Build all-FP32 PLWB
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          Push-Location pluto-team
+          python make_fp32_plwb.py `
+            --input "$env:PLUTO_WEIGHTS" `
+            --output "official-release\pluto_fp32_recon.bin" `
+            --manifest "phase2b-v1.3-out\fp32_blob_manifest.json"
+          Pop-Location
+
+      - name: Stream stderr and probe official backends
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          Push-Location pluto-team
+          python probe_official_dual_backend_v1_3.py `
+            --exe "$env:PLUTO_INFER" `
+            --int8 "$env:PLUTO_WEIGHTS" `
+            --fp32 "official-release\pluto_fp32_recon.bin" `
+            --out "phase2b-v1.3-out" `
+            --int8-threads 1 `
+            --fp32-threads 4 `
+            --int8-timeout 120 `
+            --fp32-timeout 900
+          Get-Content "phase2b-v1.3-out\official_probe_status_v1_3.txt"
+          Pop-Location
+
+      - name: Compare official FP32 with PyTorch FP32
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Stop"
+          Push-Location pluto-team
+          python compare_phase2b_v1_3.py `
+            --weights "$env:PLUTO_WEIGHTS" `
+            --official-json "phase2b-v1.3-out\official_dual_backend_v1_3.json" `
+            --out "phase2b-v1.3-out"
+          Get-Content "phase2b-v1.3-out\phase2b_v1_3_summary.txt"
+          Pop-Location
+
+      - name: Remove temporary official binaries and FP32 blob
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path "pluto-team\official-release") {
+            Remove-Item -Recurse -Force "pluto-team\official-release"
+          }
+          Write-Host "TEMP_BLOBS_REMOVED=YES"
+
+      - name: Upload streaming isolation diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase2B-v1.3-Streaming-Residual-Isolation
+          path: pluto-team/phase2b-v1.3-out
+          if-no-files-found: warn
+          compression-level: 9
