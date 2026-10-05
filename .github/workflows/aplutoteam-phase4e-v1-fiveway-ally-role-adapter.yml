@@ -1,0 +1,101 @@
+name: aPlutoTeam Phase4E v1 Five Way Ally Role Adapter
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: windows-2025
+    timeout-minutes: 180
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+      PLUTO_INFER_SHA256: ad880d8be52a6ef03893fa20644b6627e04fcd55e030178c6d52486b82340f2b
+      PLUTO_WEIGHTS_SHA256: 00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Phase4E package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip='pluto-team\aPlutoTeam_Phase4E_v1_FiveWayAllyRoleAdapter.zip'
+          if(!(Test-Path $zip)){$zip='aPlutoTeam_Phase4E_v1_FiveWayAllyRoleAdapter.zip'}
+          if(!(Test-Path $zip)){throw 'missing Phase4E package'}
+          Remove-Item -Recurse -Force 'pluto-team\phase4e-v1' -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force 'pluto-team\phase4e-v1' | Out-Null
+          Expand-Archive $zip 'pluto-team\phase4e-v1' -Force
+          foreach($f in @('phase4e_fiveway_role_adapter.py','expand_owner_plwb_5way.py','make_fp32_plwb_generic.py','plwb.py','samples\manifest.json')){
+            if(!(Test-Path (Join-Path 'pluto-team\phase4e-v1' $f))){throw "missing $f"}
+          }
+          Write-Host 'PHASE4E_SOURCE_READY=PASS'
+
+      - name: Install numpy
+        run: python -m pip install numpy
+
+      - name: Download official Pluto
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root='pluto-team\phase4e-v1'; New-Item -ItemType Directory -Force "$root\official"|Out-Null
+          $z="$root\official\pluto.zip"
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o $z $env:PLUTO_RELEASE_URL
+          if((Get-FileHash -Algorithm SHA256 $z).Hash.ToLower() -ne $env:PLUTO_RELEASE_SHA256){throw 'release SHA mismatch'}
+          Expand-Archive $z "$root\official\unpacked" -Force
+          $exe="$root\official\unpacked\pluto\pluto_infer.exe"; $w="$root\official\unpacked\pluto\pluto_weights.bin"
+          if((Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower() -ne $env:PLUTO_INFER_SHA256){throw 'infer SHA mismatch'}
+          if((Get-FileHash -Algorithm SHA256 $w).Hash.ToLower() -ne $env:PLUTO_WEIGHTS_SHA256){throw 'weights SHA mismatch'}
+          "OFFICIAL_EXE=$((Resolve-Path $exe).Path)"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "OFFICIAL_WEIGHTS=$((Resolve-Path $w).Path)"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build five-way int8 and FP32 models
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'pluto-team\phase4e-v1').Path
+          $w5=Join-Path $root 'official\pluto_weights_team5.bin'
+          $e5=Join-Path $root 'official\pluto_infer_team5.exe'
+          python "$root\expand_owner_plwb_5way.py" $env:OFFICIAL_WEIGHTS $w5
+          if($LASTEXITCODE -ne 0){throw '5way weight expansion failed'}
+          Copy-Item $env:OFFICIAL_EXE $e5 -Force
+          $b=[IO.File]::ReadAllBytes($e5)
+          $sig=($b[59201..59206]|%{$_.ToString('X2')}) -join ''
+          if($sig -ne '41B903000000'){throw "unexpected gate $sig"}
+          $b[59203]=5; [IO.File]::WriteAllBytes($e5,$b)
+          $sig2=(([IO.File]::ReadAllBytes($e5))[59201..59206]|%{$_.ToString('X2')}) -join ''
+          if($sig2 -ne '41B905000000'){throw "5way exe patch failed $sig2"}
+          $fp=Join-Path $root 'official\pluto_weights_team5_fp32.bin'
+          python "$root\make_fp32_plwb_generic.py" --input $w5 --output $fp --manifest "$root\official\fp32_manifest.json"
+          if($LASTEXITCODE -ne 0){throw 'fp32 export failed'}
+          "TEAM5_EXE=$e5"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TEAM5_INT8=$w5"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "TEAM5_FP32=$fp"|Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host 'PHASE4E_TEAM5_MODELS=PASS'
+
+      - name: Train five-way ally-role adapter
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'pluto-team\phase4e-v1').Path
+          Push-Location $root
+          New-Item -ItemType Directory -Force out|Out-Null
+          python .\phase4e_fiveway_role_adapter.py --exe $env:TEAM5_EXE --int8 $env:TEAM5_INT8 --fp32 $env:TEAM5_FP32 --samples .\samples --out .\out
+          if($LASTEXITCODE -ne 0){throw "Phase4E failed $LASTEXITCODE"}
+          Get-Content .\out\phase4e_v1_summary.txt
+          Pop-Location
+
+      - name: Cleanup
+        shell: pwsh
+        run: Remove-Item -Recurse -Force 'pluto-team\phase4e-v1\official' -ErrorAction SilentlyContinue
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase4E-v1-FiveWay-Ally-Role-Adapter
+          path: pluto-team/phase4e-v1/out
+          if-no-files-found: error
+          compression-level: 6
