@@ -1,0 +1,185 @@
+name: aPlutoTeamRuntime v110 x86 Combat-Local Ally Context + v109 Preference
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare v110 from proven v104 source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git minhook
+
+          $base='pluto-team\aPlutoTeamRuntime_X86LegacyShadowOwnerMatch_v104.zip'
+          if(!(Test-Path $base)){throw "missing proven v104 source ZIP: $base"}
+          Expand-Archive $base overlay_v104 -Force
+          Copy-Item 'overlay_v104\*' src -Recurse -Force
+
+          $v110='pluto-team\aPlutoTeamRuntime_X86CombatLocalAlly_v110.zip'
+          if(!(Test-Path $v110)){$v110='aPlutoTeamRuntime_X86CombatLocalAlly_v110.zip'}
+          if(!(Test-Path $v110)){throw 'missing v110 source package'}
+          Expand-Archive $v110 overlay_v110 -Force
+
+          foreach($f in @('PlutoSCRX86TeamRuntimeV104.cpp','build-v110.ps1')){
+            if(!(Test-Path (Join-Path overlay_v110 $f))){throw "missing v110 source $f"}
+            Copy-Item (Join-Path overlay_v110 $f) (Join-Path 'src\plutoscr_x86' $f) -Force
+          }
+          foreach($f in @('RUN_PLUTO_TEAMRUNTIME_X86_V110.cmd','README_TEAMRUNTIME_V110.txt')){
+            if(!(Test-Path (Join-Path overlay_v110 $f))){throw "missing v110 package file $f"}
+            Copy-Item (Join-Path overlay_v110 $f) (Join-Path 'src\plutoscr_x86' $f) -Force
+          }
+
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/hyukim17/pluto-ai-remastered/44736dd754c9a07fb8efc6412f138fb6607bcd77/src/pluto_bindings.h' -OutFile 'src\plutoscr_x86\pluto_bindings.h'
+          if(!(Test-Path 'minhook\include\MinHook.h')){throw 'MinHook missing'}
+
+          $cpp=Get-Content 'src\plutoscr_x86\PlutoSCRX86TeamRuntimeV104.cpp' -Raw
+          foreach($needle in @(
+            'PLUTOTEAMRUNTIME_V110_RESIDENT=LOADED',
+            'TEAM_RUNTIME_PLUTO_MODEL=OFFICIAL_UNMODIFIED_NO_TRAINING',
+            'TEAM_RUNTIME_MODEL_OWNER_ENCODING=OFFICIAL_STOCK_SELF0_OTHER1_NEUTRAL2',
+            'TEAM_RUNTIME_ALLY_ROLE_POLICY=ALL_ALLY_NONOWNED_BY_DEFAULT_COMBAT_FORCE_TO_SELF_ONLY_NEAR_VISIBLE_ENEMY',
+            'team110AllyInCombatContext',
+            'kV110AllyCombatContextRadiusPx=512',
+            'combatContext?0:2',
+            'V110_ALLY_CONTEXT_SAMPLE',
+            'V110_SHM_OWNER_REWRITE=PASS',
+            'actorMask[r]=0',
+            'targetMask[r]=0',
+            'team109ObserveDecision',
+            'team109ApplyEarlyArmyPreference',
+            'team109RestoreOneRequestMask',
+            'actionMask[workerAction]=0',
+            'kV109PreferenceEndFrame=7200u',
+            'kV109MinWorkersForBias=10',
+            'kV109EligibleCadence=3',
+            'kV109CooldownFrames=96u',
+            'kV109MaxNudges=18',
+            'V109_EARLY_ARMY_BIAS=APPLIED',
+            'V109_PREF_SUMMARY',
+            'return shape=="3,256"',
+            'TEAM_TRAINING_RECORDER=CONFIRMED_DISABLED_V110'
+          )){
+            if(!$cpp.Contains($needle)){throw "v110 source guard missing: $needle"}
+          }
+          if($cpp.Contains('recorder33ArmAfterFirstFrame(matchGeneration')){throw 'v110 must not arm PTRJ recorder'}
+          if($cpp.Contains('pluto_weights_team4')){throw 'v110 must not use patched/team4 weights'}
+
+          # Hard guarantee that v109 early-army preference core is unchanged.
+          $v109ref='pluto-team\aPlutoTeamRuntime_X86EarlyArmyPreference_v109.zip'
+          if(!(Test-Path $v109ref)){throw 'v109 reference ZIP missing; cannot prove preference preservation'}
+          Expand-Archive $v109ref overlay_v109_ref -Force
+          $ref=Get-Content 'overlay_v109_ref\PlutoSCRX86TeamRuntimeV104.cpp' -Raw
+          $ref=$ref.Replace("`r`n","`n")
+          $new=$cpp.Replace("`r`n","`n")
+          $start='// v109 early-army playstyle preference.'
+          $refEnd='static bool team4RewriteShmOwners(void*view){'
+          $newEnd='// v110 observation-only ally separation.'
+          $ra=$ref.IndexOf($start);$rb=$ref.IndexOf($refEnd,$ra)
+          $na=$new.IndexOf($start);$nb=$new.IndexOf($newEnd,$na)
+          if($ra -lt 0 -or $rb -lt 0 -or $na -lt 0 -or $nb -lt 0){throw 'preference comparison markers missing'}
+          $refPref=$ref.Substring($ra,$rb-$ra).TrimEnd()
+          $newPref=$new.Substring($na,$nb-$na).TrimEnd()
+          if($refPref -cne $newPref){throw 'V109 preference core changed in v110'}
+          Write-Host 'V110_V109_PREFERENCE_CORE_EXACT=PASS'
+          Write-Host 'V110_SOURCE_GUARDS=PASS'
+
+          Get-ChildItem src -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+          Set-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#pragma once' -Encoding ASCII
+          Add-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#define SVN_REV 0' -Encoding ASCII
+          Add-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#define BUILD_DEBUG 0' -Encoding ASCII
+          Write-Host 'PLUTOTEAMRUNTIME_V110_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' | Where-Object {$_.FullName -notlike '*\amd64\*'} | Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+          Write-Host 'PLUTOTEAMRUNTIME_V110_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v110 resident
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v110.ps1
+
+      - name: Validate official stock Pluto model contract
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory official_unpack -Force | Out-Null
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o official_pluto.zip $env:PLUTO_RELEASE_URL
+          if($LASTEXITCODE -ne 0){throw 'official download failed'}
+          $sha=(Get-FileHash -Algorithm SHA256 official_pluto.zip).Hash.ToLower()
+          if($sha -ne $env:PLUTO_RELEASE_SHA256){throw "release SHA mismatch $sha"}
+          Expand-Archive official_pluto.zip official_unpack -Force
+
+          $infer='official_unpack\pluto\pluto_infer.exe'
+          $weights='official_unpack\pluto\pluto_weights.bin'
+          [byte[]]$b=[IO.File]::ReadAllBytes((Resolve-Path $infer))
+          $sig=($b[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig -ne '41B903000000'){throw "official owner gate is not stock 3-way: $sig"}
+
+          [byte[]]$raw=[IO.File]::ReadAllBytes((Resolve-Path $weights))
+          [UInt64]$hlen=[BitConverter]::ToUInt64($raw,8)
+          $hdr=([Text.Encoding]::UTF8.GetString($raw,16,[int]$hlen) | ConvertFrom-Json)
+          $t=$hdr.tensors | Where-Object {$_.name -eq 'owner_emb.weight'} | Select-Object -First 1
+          if([int]$t.shape[0] -ne 3 -or [int]$t.shape[1] -ne 256){throw 'official owner embedding is not [3,256]'}
+          Write-Host 'V110_OFFICIAL_MODEL_GATE=3_PASS'
+          Write-Host 'V110_OFFICIAL_OWNER_EMB_3X256=PASS'
+          Write-Host 'V110_MODEL_PATCHING=NONE_PASS'
+
+      - name: Assemble v110 runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory artifact_v110 -Force | Out-Null
+          Copy-Item 'build_v110\PlutoSCRX86TeamRuntimeV110.dll' artifact_v110
+          Copy-Item 'build_v110\PlutoSCRX86Inject.exe' artifact_v110
+          Copy-Item 'src\plutoscr_x86\RUN_PLUTO_TEAMRUNTIME_X86_V110.cmd' artifact_v110
+          Copy-Item 'src\plutoscr_x86\README_TEAMRUNTIME_V110.txt' artifact_v110
+          $restore=Get-ChildItem src -Recurse -File -Filter 'RESTORE_PLUTO_OFFICIAL_V104.cmd' | Select-Object -First 1
+          if($restore){Copy-Item $restore.FullName 'artifact_v110\RESTORE_PLUTO_OFFICIAL_V110.cmd'}
+          foreach($f in @(
+            'PlutoSCRX86TeamRuntimeV110.dll',
+            'PlutoSCRX86Inject.exe',
+            'RUN_PLUTO_TEAMRUNTIME_X86_V110.cmd',
+            'README_TEAMRUNTIME_V110.txt'
+          )){
+            if(!(Test-Path (Join-Path artifact_v110 $f))){throw "missing artifact $f"}
+          }
+          Write-Host 'PLUTOTEAMRUNTIME_V110_PACKAGE=PASS'
+
+      - name: Upload v110 runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeamRuntime-v110-X86-CombatLocal-Ally-v109-Pref
+          path: artifact_v110
+          if-no-files-found: error
+          compression-level: 9
