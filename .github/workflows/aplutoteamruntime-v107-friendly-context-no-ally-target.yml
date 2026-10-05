@@ -1,0 +1,190 @@
+name: aPlutoTeamRuntime v107 x86 Friendly Context No Ally Target
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare v107 from proven v104 source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git minhook
+
+          $base='pluto-team\aPlutoTeamRuntime_X86LegacyShadowOwnerMatch_v104.zip'
+          if(!(Test-Path $base)){throw "missing proven v104 source ZIP: $base"}
+          Expand-Archive $base overlay_v104 -Force
+          Copy-Item 'overlay_v104\*' src -Recurse -Force
+
+          $v107='pluto-team\aPlutoTeamRuntime_X86FriendlyContextNoTarget_v107.zip'
+          if(!(Test-Path $v107)){$v107='aPlutoTeamRuntime_X86FriendlyContextNoTarget_v107.zip'}
+          if(!(Test-Path $v107)){throw 'missing v107 source package'}
+          Expand-Archive $v107 overlay_v107 -Force
+
+          foreach($f in @('PlutoSCRX86TeamRuntimeV104.cpp','PlutoTeamRuntimePrepV104.cpp')){
+            if(!(Test-Path (Join-Path overlay_v107 $f))){throw "missing v107 source $f"}
+            Copy-Item (Join-Path overlay_v107 $f) (Join-Path 'src\plutoscr_x86' $f) -Force
+          }
+          foreach($f in @('PATCH_ALLY_FRIENDLY_V107.ps1','RUN_PLUTO_TEAMRUNTIME_X86_V107.cmd','README_TEAMRUNTIME_V107.txt')){
+            if(!(Test-Path (Join-Path overlay_v107 $f))){throw "missing v107 package file $f"}
+            Copy-Item (Join-Path overlay_v107 $f) (Join-Path 'src\plutoscr_x86' $f) -Force
+          }
+
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/chan22222/Pluto-AI-Starcraft-Remaster/44736dd754c9a07fb8efc6412f138fb6607bcd77/src/pluto_bindings.h' -OutFile 'src\plutoscr_x86\pluto_bindings.h'
+          if(!(Test-Path 'minhook\include\MinHook.h')){throw 'MinHook missing'}
+
+          # Guard the exact conceptual fix before compilation.
+          $cpp=Get-Content 'src\plutoscr_x86\PlutoSCRX86TeamRuntimeV104.cpp' -Raw
+          foreach($needle in @(
+            'b+0x79100',
+            'b+0x79500',
+            'actorMask[r]=0',
+            'targetMask[r]=0',
+            'ALLY_EQUALS_SELF_FRIENDLY_CONTEXT_V107'
+          )){
+            if(!$cpp.Contains($needle)){throw "v107 semantic source guard missing: $needle"}
+          }
+
+          # Guard the launcher ordering: actual prep invocation first, patch invocation second.
+          $run=Get-Content 'src\plutoscr_x86\RUN_PLUTO_TEAMRUNTIME_X86_V107.cmd'
+          $prepLine=-1; $patchLine=-1
+          for($i=0;$i -lt $run.Count;$i++){
+            if($run[$i] -match '^"%ROOT%\\PlutoTeamRuntimePrepV104\.exe"'){$prepLine=$i}
+            if($run[$i] -match '^powershell .*PATCH_ALLY_FRIENDLY_V107\.ps1'){$patchLine=$i}
+          }
+          if($prepLine -lt 0 -or $patchLine -lt 0 -or $patchLine -le $prepLine){
+            throw "launcher ordering invalid prep=$prepLine patch=$patchLine"
+          }
+          Write-Host "V107_LAUNCHER_ORDER=PASS prep_line=$prepLine patch_line=$patchLine"
+
+          Get-ChildItem src -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+          Set-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#pragma once' -Encoding ASCII
+          Add-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#define SVN_REV 0' -Encoding ASCII
+          Add-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#define BUILD_DEBUG 0' -Encoding ASCII
+
+          Write-Host 'PLUTOTEAMRUNTIME_V107_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' | Where-Object {$_.FullName -match '\Bin\MSBuild\.exe$' -and $_.FullName -notmatch '\amd64\'} | Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+          Write-Host 'PLUTOTEAMRUNTIME_V107_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v107 resident
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v104.ps1
+
+      - name: Validate exact v107 model semantics
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory 'runtime_test\pluto' -Force | Out-Null
+          New-Item -ItemType Directory official_unpack -Force | Out-Null
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o official_pluto.zip $env:PLUTO_RELEASE_URL
+          if($LASTEXITCODE -ne 0){throw 'official download failed'}
+          $sha=(Get-FileHash -Algorithm SHA256 official_pluto.zip).Hash.ToLower()
+          if($sha -ne $env:PLUTO_RELEASE_SHA256){throw "release SHA mismatch $sha"}
+          Expand-Archive official_pluto.zip official_unpack -Force
+          Copy-Item 'official_unpack\pluto\pluto_infer.exe' 'runtime_test\pluto\pluto_infer.exe'
+          Copy-Item 'official_unpack\pluto\pluto_weights.bin' 'runtime_test\pluto\pluto_weights.bin'
+
+          # This is the actual runtime order.
+          & '.\build_v104\PlutoTeamRuntimePrepV104.exe' "$PWD\runtime_test"
+          if($LASTEXITCODE -ne 0){throw "team4 prep failed: $LASTEXITCODE"}
+          powershell -NoProfile -ExecutionPolicy Bypass -File '.\src\plutoscr_x86\PATCH_ALLY_FRIENDLY_V107.ps1' -Weights '.\runtime_test\pluto\pluto_weights.bin'
+          if($LASTEXITCODE -ne 0){throw "friendly patch failed: $LASTEXITCODE"}
+
+          $b=[IO.File]::ReadAllBytes((Resolve-Path 'runtime_test\pluto\pluto_infer.exe'))
+          $sig=($b[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig -ne '41B904000000'){throw "owner gate is not four-way: $sig"}
+
+          [byte[]]$raw=[IO.File]::ReadAllBytes((Resolve-Path 'runtime_test\pluto\pluto_weights.bin'))
+          [UInt64]$hlen=[BitConverter]::ToUInt64($raw,8)
+          $hdr=([Text.Encoding]::UTF8.GetString($raw,16,[int]$hlen) | ConvertFrom-Json)
+          $t=$hdr.tensors | Where-Object {$_.name -eq 'owner_emb.weight'} | Select-Object -First 1
+          if([int]$t.shape[0] -ne 4 -or [int]$t.shape[1] -ne 256){throw "bad owner shape"}
+          [Int64]$base=$raw.LongLength-[Int64]$hdr.total_bytes
+          [Int64]$off=$base+[Int64]$t.offset
+          $row=1024
+          function RowEq([int]$a,[int]$c){
+            for($i=0;$i -lt $row;$i++){if($raw[$off+$a*$row+$i] -ne $raw[$off+$c*$row+$i]){return $false}}
+            return $true
+          }
+          if(!(RowEq 1 0)){throw 'ALLY row is not SELF semantic'}
+          if(RowEq 2 0){throw 'ENEMY unexpectedly equals SELF'}
+          if(RowEq 3 0){throw 'NEUTRAL unexpectedly equals SELF'}
+
+          Write-Host 'TEAM4_V107_OWNER_MAPPING=SELF0_ALLY1_ENEMY2_NEUTRAL3'
+          Write-Host 'TEAM4_V107_ALLY_EQUALS_SELF_CONTEXT=PASS'
+          Write-Host 'TEAM4_V107_ACTOR_MASK_ZERO_FOR_ALLY=SOURCE_GUARDED'
+          Write-Host 'TEAM4_V107_TARGET_MASK_ZERO_FOR_ALLY=SOURCE_GUARDED'
+          Write-Host 'PLUTOTEAMRUNTIME_V107_SEMANTICS=PASS'
+
+          Remove-Item -Recurse -Force runtime_test,official_unpack
+          Remove-Item -Force official_pluto.zip
+
+      - name: Assemble v107 runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory artifact_v107 -Force | Out-Null
+          Copy-Item 'build_v104\PlutoSCRX86TeamRuntimeV104.dll' 'artifact_v107\PlutoSCRX86TeamRuntimeV107.dll'
+          Copy-Item 'build_v104\PlutoSCRX86Inject.exe' 'artifact_v107\PlutoSCRX86Inject.exe'
+          Copy-Item 'build_v104\PlutoTeamRuntimePrepV104.exe' 'artifact_v107\PlutoTeamRuntimePrepV104.exe'
+          Copy-Item 'src\plutoscr_x86\PATCH_ALLY_FRIENDLY_V107.ps1' artifact_v107
+          Copy-Item 'src\plutoscr_x86\RUN_PLUTO_TEAMRUNTIME_X86_V107.cmd' artifact_v107
+          Copy-Item 'src\plutoscr_x86\README_TEAMRUNTIME_V107.txt' artifact_v107
+          foreach($n in @('trajectory_v103.py','PACK_PLUTO_TEAM_TRAINING_DATA_V104.cmd')){
+            $f=Get-ChildItem src -Recurse -File -Filter $n | Select-Object -First 1
+            if($f){Copy-Item $f.FullName artifact_v107}
+          }
+          $restore=Get-ChildItem src -Recurse -File -Filter 'RESTORE_PLUTO_OFFICIAL_V104.cmd' | Select-Object -First 1
+          if($restore){Copy-Item $restore.FullName 'artifact_v107\RESTORE_PLUTO_OFFICIAL_V107.cmd'}
+
+          foreach($f in @(
+            'PlutoSCRX86TeamRuntimeV107.dll',
+            'PlutoSCRX86Inject.exe',
+            'PlutoTeamRuntimePrepV104.exe',
+            'PATCH_ALLY_FRIENDLY_V107.ps1',
+            'RUN_PLUTO_TEAMRUNTIME_X86_V107.cmd'
+          )){
+            if(!(Test-Path (Join-Path artifact_v107 $f))){throw "missing artifact $f"}
+          }
+          Write-Host 'PLUTOTEAMRUNTIME_V107_PACKAGE=PASS'
+
+      - name: Upload v107 runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeamRuntime-v107-X86-Friendly-Context-No-Ally-Target
+          path: artifact_v107
+          if-no-files-found: error
+          compression-level: 9
