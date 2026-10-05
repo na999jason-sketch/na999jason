@@ -1,0 +1,111 @@
+name: aPlutoTeam ALLY Semantic Training v1
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: windows-2025
+    timeout-minutes: 240
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare ALLY semantic package
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip='pluto-team\aPlutoTeam_ALLY_Semantic_Training_v1.zip'
+          if(!(Test-Path $zip)){$zip='aPlutoTeam_ALLY_Semantic_Training_v1.zip'}
+          if(!(Test-Path $zip)){throw 'missing aPlutoTeam_ALLY_Semantic_Training_v1.zip'}
+          Expand-Archive $zip ally_semantic -Force
+          foreach($f in @('ally_semantic_train.py','expand_owner_plwb_4way.py','static_validate.py','README.md','dataset\manifest.json')){
+            if(!(Test-Path (Join-Path ally_semantic $f))){throw "missing package file $f"}
+          }
+          Write-Host 'ALLY_SEMANTIC_PACKAGE_PREP=PASS'
+
+      - name: Install numpy
+        shell: powershell
+        run: python -m pip install --disable-pip-version-check --no-warn-script-location numpy
+
+      - name: Static semantic validation
+        shell: powershell
+        run: python .\ally_semantic\static_validate.py
+
+      - name: Download official Pluto
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o official_pluto.zip $env:PLUTO_RELEASE_URL
+          if($LASTEXITCODE -ne 0){throw 'official Pluto download failed'}
+          $sha=(Get-FileHash -Algorithm SHA256 official_pluto.zip).Hash.ToLower()
+          if($sha -ne $env:PLUTO_RELEASE_SHA256){throw "release SHA mismatch: $sha"}
+          New-Item -ItemType Directory official -Force | Out-Null
+          Expand-Archive official_pluto.zip official -Force
+          if(!(Test-Path 'official\pluto\pluto_infer.exe')){throw 'official pluto_infer.exe missing'}
+          if(!(Test-Path 'official\pluto\pluto_weights.bin')){throw 'official pluto_weights.bin missing'}
+          Write-Host 'OFFICIAL_PLUTO_RELEASE=PASS'
+
+      - name: Build real four-way runtime model
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          python .\ally_semantic\expand_owner_plwb_4way.py .\official\pluto\pluto_weights.bin .\pluto_weights_team4.bin
+          if($LASTEXITCODE -ne 0){throw '4-way weight expansion failed'}
+
+          [byte[]]$b=[IO.File]::ReadAllBytes((Resolve-Path '.\official\pluto\pluto_infer.exe'))
+          $sig=($b[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig -ne '41B903000000'){throw "unexpected owner gate signature: $sig"}
+          $b[59203]=4
+          [IO.File]::WriteAllBytes((Join-Path $PWD 'pluto_infer_team4.exe'),$b)
+          [byte[]]$c=[IO.File]::ReadAllBytes((Resolve-Path '.\pluto_infer_team4.exe'))
+          $sig2=($c[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig2 -ne '41B904000000'){throw "4-way owner gate patch failed: $sig2"}
+          Write-Host 'ALLY_SEMANTIC_TEAM4_ENGINE_MODEL=PASS'
+
+      - name: Train independent ALLY semantics
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory ally_result -Force | Out-Null
+          python .\ally_semantic\ally_semantic_train.py `
+            --exe .\pluto_infer_team4.exe `
+            --weights .\pluto_weights_team4.bin `
+            --dataset .\ally_semantic\dataset `
+            --out .\ally_result `
+            --seeds 6 `
+            --generations 6 `
+            --directions 4
+          if($LASTEXITCODE -ne 0){throw "ALLY semantic trainer failed: $LASTEXITCODE"}
+          if(!(Test-Path '.\ally_result\ally_semantic_training_report.json')){throw 'training report missing'}
+          if(!(Test-Path '.\ally_result\ally_semantic_training_summary.txt')){throw 'training summary missing'}
+          Get-Content '.\ally_result\ally_semantic_training_summary.txt'
+
+      - name: Validate deployment gate
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $r=Get-Content '.\ally_result\ally_semantic_training_report.json' -Raw | ConvertFrom-Json
+          if($r.deployable){
+            if(!(Test-Path '.\ally_result\ally_semantic_embedding_f32.bin')){throw 'deployable=true but embedding binary missing'}
+            if(!(Test-Path '.\ally_result\ally_semantic_embedding.json')){throw 'deployable=true but embedding JSON missing'}
+            $len=(Get-Item '.\ally_result\ally_semantic_embedding_f32.bin').Length
+            if($len -ne 1024){throw "ALLY embedding must be exactly 1024 bytes, got $len"}
+            Write-Host 'ALLY_SEMANTIC_EMBEDDING_FOUND'
+          } else {
+            if(Test-Path '.\ally_result\ally_semantic_embedding_f32.bin'){throw 'nondeployable run unexpectedly emitted embedding'}
+            Write-Host 'NO_DEPLOYABLE_ALLY_SEMANTIC_EMBEDDING'
+          }
+          Write-Host 'ALLY_SEMANTIC_DEPLOYMENT_GATE=PASS'
+
+      - name: Upload ALLY semantic result
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-ALLY-Semantic-Training-v1-Result
+          path: ally_result
+          if-no-files-found: error
+          compression-level: 9
