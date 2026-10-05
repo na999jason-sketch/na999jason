@@ -1,0 +1,138 @@
+name: aPlutoTeam Phase4A v1 Ally Semantic Calibration
+
+on:
+  workflow_dispatch:
+
+jobs:
+  calibrate:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+      PLUTO_INFER_SHA256: ad880d8be52a6ef03893fa20644b6627e04fcd55e030178c6d52486b82340f2b
+      PLUTO_WEIGHTS_SHA256: 00b400eace6e4782202ebdcb3c30db76054aaa6a08c6a7dcb59575abc2d0a26e
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Prepare Phase4A package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $zip='pluto-team\aPlutoTeam_Phase4A_v1_AllySemanticCalibration.zip'
+          if(!(Test-Path $zip)){$zip='aPlutoTeam_Phase4A_v1_AllySemanticCalibration.zip'}
+          if(!(Test-Path $zip)){throw 'missing Phase4A package in pluto-team/ or repository root'}
+          Remove-Item -Recurse -Force 'pluto-team\phase4a-v1' -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force 'pluto-team\phase4a-v1' | Out-Null
+          Expand-Archive -Path $zip -DestinationPath 'pluto-team\phase4a-v1' -Force
+          foreach($f in @('phase4a_ally_semantic_calibration.py','expand_owner_plwb_4way.py','plwb.py','README.md','samples\manifest.json')){
+            if(!(Test-Path (Join-Path 'pluto-team\phase4a-v1' $f))){throw "missing package file $f"}
+          }
+          Write-Host "PHASE4A_PACKAGE=$zip"
+          Write-Host 'PHASE4A_SOURCE_READY=PASS'
+
+      - name: Install numpy
+        shell: pwsh
+        run: python -m pip install numpy
+
+      - name: Validate real team samples
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Push-Location 'pluto-team\phase4a-v1'
+          @'
+          import hashlib,json,struct
+          from pathlib import Path
+          p=Path('samples'); m=json.loads((p/'manifest.json').read_text(encoding='utf-8'))
+          assert len(m['samples'])==48, len(m['samples'])
+          cats={}
+          for x in m['samples']:
+              b=(p/x['file']).read_bytes()
+              assert hashlib.sha256(b).hexdigest()==x['sha256']
+              n,w,h,*_=struct.unpack_from('<iii',b,0)
+              assert n==x['n'] and (w,h)==(128,128)
+              cats[x['category']]=cats.get(x['category'],0)+1
+          assert cats=={'peace_dense':12,'enemy_preserve':12,'peace_block':12,'ally_threat':12},cats
+          print('PHASE4A_SAMPLE_VALIDATION=PASS',cats)
+          '@ | python -
+          Pop-Location
+
+      - name: Download exact official Pluto release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root='pluto-team\phase4a-v1'
+          New-Item -ItemType Directory -Force "$root\official" | Out-Null
+          $z="$root\official\pluto.zip"
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o $z $env:PLUTO_RELEASE_URL
+          if($LASTEXITCODE -ne 0){throw 'official release download failed'}
+          $sha=(Get-FileHash -Algorithm SHA256 $z).Hash.ToLower()
+          if($sha -ne $env:PLUTO_RELEASE_SHA256){throw "release SHA mismatch $sha"}
+          Expand-Archive $z "$root\official\unpacked" -Force
+          $exe="$root\official\unpacked\pluto\pluto_infer.exe"
+          $w="$root\official\unpacked\pluto\pluto_weights.bin"
+          if((Get-FileHash -Algorithm SHA256 $exe).Hash.ToLower() -ne $env:PLUTO_INFER_SHA256){throw 'infer SHA mismatch'}
+          if((Get-FileHash -Algorithm SHA256 $w).Hash.ToLower() -ne $env:PLUTO_WEIGHTS_SHA256){throw 'weights SHA mismatch'}
+          "OFFICIAL_EXE=$((Resolve-Path $exe).Path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "OFFICIAL_WEIGHTS=$((Resolve-Path $w).Path)" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'PHASE4A_OFFICIAL_RELEASE=PASS'
+
+      - name: Build four-way official team seed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'pluto-team\phase4a-v1').Path
+          $w4=Join-Path $root 'official\pluto_weights_team4.bin'
+          $e4=Join-Path $root 'official\pluto_infer_team4.exe'
+          python "$root\expand_owner_plwb_4way.py" $env:OFFICIAL_WEIGHTS $w4
+          if($LASTEXITCODE -ne 0){throw 'owner expansion failed'}
+          Copy-Item $env:OFFICIAL_EXE $e4 -Force
+          $b=[IO.File]::ReadAllBytes($e4)
+          $sig=($b[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig -ne '41B903000000'){throw "unexpected owner gate $sig"}
+          $b[59203]=4
+          [IO.File]::WriteAllBytes($e4,$b)
+          $sig2=(([IO.File]::ReadAllBytes($e4))[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig2 -ne '41B904000000'){throw "4-way patch failed $sig2"}
+          "TEAM4_EXE=$e4" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "TEAM4_WEIGHTS=$w4" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host 'PHASE4A_TEAM4_BUILD=PASS'
+
+      - name: Learn dedicated ALLY semantic embedding
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=(Resolve-Path 'pluto-team\phase4a-v1').Path
+          Push-Location $root
+          New-Item -ItemType Directory -Force 'out' | Out-Null
+          python .\phase4a_ally_semantic_calibration.py `
+            --exe $env:TEAM4_EXE `
+            --weights $env:TEAM4_WEIGHTS `
+            --samples .\samples `
+            --out .\out
+          if($LASTEXITCODE -ne 0){throw "Phase4A calibration failed: $LASTEXITCODE"}
+          Get-Content .\out\phase4a_v1_summary.txt
+          Pop-Location
+
+      - name: Remove large temporary official files
+        if: always()
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force 'pluto-team\phase4a-v1\official' -ErrorAction SilentlyContinue
+          Remove-Item -Force 'pluto-team\phase4a-v1\out\candidate_weights.bin' -ErrorAction SilentlyContinue
+
+      - name: Upload learned ALLY embedding
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeam-Phase4A-v1-Learned-Ally-Embedding
+          path: pluto-team/phase4a-v1/out
+          if-no-files-found: warn
+          compression-level: 9
