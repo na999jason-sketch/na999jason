@@ -1,0 +1,163 @@
+name: aPlutoTeamRuntime v109 x86 Early Army Preference
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare v109 from proven v104 source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git minhook
+
+          $base='pluto-team\aPlutoTeamRuntime_X86LegacyShadowOwnerMatch_v104.zip'
+          if(!(Test-Path $base)){throw "missing proven v104 source ZIP: $base"}
+          Expand-Archive $base overlay_v104 -Force
+          Copy-Item 'overlay_v104\*' src -Recurse -Force
+
+          $v109='pluto-team\aPlutoTeamRuntime_X86EarlyArmyPreference_v109.zip'
+          if(!(Test-Path $v109)){$v109='aPlutoTeamRuntime_X86EarlyArmyPreference_v109.zip'}
+          if(!(Test-Path $v109)){throw 'missing v109 source package'}
+          Expand-Archive $v109 overlay_v109 -Force
+
+          foreach($f in @('PlutoSCRX86TeamRuntimeV104.cpp','build-v109.ps1')){
+            if(!(Test-Path (Join-Path overlay_v109 $f))){throw "missing v109 source $f"}
+            Copy-Item (Join-Path overlay_v109 $f) (Join-Path 'src\plutoscr_x86' $f) -Force
+          }
+          foreach($f in @('RUN_PLUTO_TEAMRUNTIME_X86_V109.cmd','README_TEAMRUNTIME_V109.txt')){
+            if(!(Test-Path (Join-Path overlay_v109 $f))){throw "missing v109 package file $f"}
+            Copy-Item (Join-Path overlay_v109 $f) (Join-Path 'src\plutoscr_x86' $f) -Force
+          }
+
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/hyukim17/pluto-ai-remastered/44736dd754c9a07fb8efc6412f138fb6607bcd77/src/pluto_bindings.h' -OutFile 'src\plutoscr_x86\pluto_bindings.h'
+          if(!(Test-Path 'minhook\include\MinHook.h')){throw 'MinHook missing'}
+
+          $cpp=Get-Content 'src\plutoscr_x86\PlutoSCRX86TeamRuntimeV104.cpp' -Raw
+          foreach($needle in @(
+            'PLUTOTEAMRUNTIME_V109_RESIDENT=LOADED',
+            'TEAM_RUNTIME_PLUTO_MODEL=OFFICIAL_UNMODIFIED_NO_TRAINING',
+            'TEAM_RUNTIME_MODEL_OWNER_ENCODING=OFFICIAL_STOCK_SELF0_OTHER1_NEUTRAL2',
+            'team108AllyIsFriendlyForce',
+            'friendlyForce?0:2',
+            'actorMask[r]=0',
+            'targetMask[r]=0',
+            'team109ObserveDecision',
+            'team109ApplyEarlyArmyPreference',
+            'team109RestoreOneRequestMask',
+            'actionMask[workerAction]=0',
+            'kV109PreferenceEndFrame=7200u',
+            'kV109MinWorkersForBias=10',
+            'V109_EARLY_ARMY_BIAS=APPLIED',
+            'V109_PREF_SUMMARY',
+            'return shape=="3,256"',
+            'TEAM_TRAINING_RECORDER=CONFIRMED_DISABLED_V109'
+          )){
+            if(!$cpp.Contains($needle)){throw "v109 source guard missing: $needle"}
+          }
+          if($cpp.Contains('recorder33ArmAfterFirstFrame(matchGeneration')){throw 'v109 must not arm PTRJ recorder'}
+          if($cpp.Contains('pluto_weights_team4')){throw 'v109 must not use patched/team4 weights'}
+          Write-Host 'V109_SOURCE_GUARDS=PASS'
+
+          Get-ChildItem src -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+          Set-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#pragma once' -Encoding ASCII
+          Add-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#define SVN_REV 0' -Encoding ASCII
+          Add-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#define BUILD_DEBUG 0' -Encoding ASCII
+
+          Write-Host 'PLUTOTEAMRUNTIME_V109_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' | Where-Object {$_.FullName -notlike '*\amd64\*'} | Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+          Write-Host 'PLUTOTEAMRUNTIME_V109_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v109 resident
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v109.ps1
+
+      - name: Validate official stock Pluto model contract
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory official_unpack -Force | Out-Null
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o official_pluto.zip $env:PLUTO_RELEASE_URL
+          if($LASTEXITCODE -ne 0){throw 'official download failed'}
+          $sha=(Get-FileHash -Algorithm SHA256 official_pluto.zip).Hash.ToLower()
+          if($sha -ne $env:PLUTO_RELEASE_SHA256){throw "release SHA mismatch $sha"}
+          Expand-Archive official_pluto.zip official_unpack -Force
+
+          $infer='official_unpack\pluto\pluto_infer.exe'
+          $weights='official_unpack\pluto\pluto_weights.bin'
+          [byte[]]$b=[IO.File]::ReadAllBytes((Resolve-Path $infer))
+          $sig=($b[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig -ne '41B903000000'){throw "official owner gate is not stock 3-way: $sig"}
+
+          [byte[]]$raw=[IO.File]::ReadAllBytes((Resolve-Path $weights))
+          [UInt64]$hlen=[BitConverter]::ToUInt64($raw,8)
+          $hdr=([Text.Encoding]::UTF8.GetString($raw,16,[int]$hlen) | ConvertFrom-Json)
+          $t=$hdr.tensors | Where-Object {$_.name -eq 'owner_emb.weight'} | Select-Object -First 1
+          if([int]$t.shape[0] -ne 3 -or [int]$t.shape[1] -ne 256){throw 'official owner embedding is not [3,256]'}
+
+          Write-Host 'V109_OFFICIAL_MODEL_GATE=3_PASS'
+          Write-Host 'V109_OFFICIAL_OWNER_EMB_3X256=PASS'
+          Write-Host 'V109_MODEL_PATCHING=NONE_PASS'
+
+      - name: Assemble v109 runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory artifact_v109 -Force | Out-Null
+          Copy-Item 'build_v109\PlutoSCRX86TeamRuntimeV109.dll' artifact_v109
+          Copy-Item 'build_v109\PlutoSCRX86Inject.exe' artifact_v109
+          Copy-Item 'src\plutoscr_x86\RUN_PLUTO_TEAMRUNTIME_X86_V109.cmd' artifact_v109
+          Copy-Item 'src\plutoscr_x86\README_TEAMRUNTIME_V109.txt' artifact_v109
+          $restore=Get-ChildItem src -Recurse -File -Filter 'RESTORE_PLUTO_OFFICIAL_V104.cmd' | Select-Object -First 1
+          if($restore){Copy-Item $restore.FullName 'artifact_v109\RESTORE_PLUTO_OFFICIAL_V109.cmd'}
+
+          foreach($f in @(
+            'PlutoSCRX86TeamRuntimeV109.dll',
+            'PlutoSCRX86Inject.exe',
+            'RUN_PLUTO_TEAMRUNTIME_X86_V109.cmd',
+            'README_TEAMRUNTIME_V109.txt'
+          )){
+            if(!(Test-Path (Join-Path artifact_v109 $f))){throw "missing artifact $f"}
+          }
+          Write-Host 'PLUTOTEAMRUNTIME_V109_PACKAGE=PASS'
+
+      - name: Upload v109 runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeamRuntime-v109-X86-Early-Army-Preference
+          path: artifact_v109
+          if-no-files-found: error
+          compression-level: 9
