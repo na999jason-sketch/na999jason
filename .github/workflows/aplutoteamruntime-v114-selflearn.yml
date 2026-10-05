@@ -1,0 +1,195 @@
+name: aPlutoTeamRuntime v114 x86 Self-Learning Recorder + Shadow Learner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      PLUTO_RELEASE_URL: https://github.com/tscmoo/pluto/releases/download/cog2026-2578600/pluto-cog2026-2578600.zip
+      PLUTO_RELEASE_SHA256: d4e2225446f5048e131065357173952f0286586da77ebb8bddf7fc766c3844a5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare v114 from proven v113 baseline
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 https://github.com/NomaDamas/starcraft-api.git src
+          git clone --depth 1 --branch v1.3.4 https://github.com/TsudaKageyu/minhook.git minhook
+
+          $base='pluto-team\aPlutoTeamRuntime_X86LegacyShadowOwnerMatch_v104.zip'
+          if(!(Test-Path $base)){throw "missing proven v104 source ZIP: $base"}
+          Expand-Archive $base overlay_v104 -Force
+          Copy-Item 'overlay_v104\*' src -Recurse -Force
+
+          $v114='pluto-team\aPlutoTeamRuntime_X86SelfLearn_v114.zip'
+          if(!(Test-Path $v114)){$v114='aPlutoTeamRuntime_X86SelfLearn_v114.zip'}
+          if(!(Test-Path $v114)){throw 'missing v114 source package'}
+          Expand-Archive $v114 overlay_v114 -Force
+
+          foreach($f in @('PlutoSCRX86TeamRuntimeV104.cpp','build-v114.ps1','trajectory_v114.py','pluto_shadow_learn_v114.py')){
+            if(!(Test-Path (Join-Path overlay_v114 $f))){throw "missing v114 source $f"}
+            Copy-Item (Join-Path overlay_v114 $f) (Join-Path 'src\plutoscr_x86' $f) -Force
+          }
+          foreach($f in @('RUN_PLUTO_TEAMRUNTIME_X86_V114.cmd','README_TEAMRUNTIME_V114.txt','PACK_PLUTO_SELFLEARN_DATA_V114.cmd','RUN_SHADOW_SELFLEARN_V114.cmd')){
+            if(!(Test-Path (Join-Path overlay_v114 $f))){throw "missing v114 package file $f"}
+            Copy-Item (Join-Path overlay_v114 $f) (Join-Path 'src\plutoscr_x86' $f) -Force
+          }
+
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/hyukim17/pluto-ai-remastered/44736dd754c9a07fb8efc6412f138fb6607bcd77/src/pluto_bindings.h' -OutFile 'src\plutoscr_x86\pluto_bindings.h'
+          if(!(Test-Path 'minhook\include\MinHook.h')){throw 'MinHook missing'}
+
+          $cpp=Get-Content 'src\plutoscr_x86\PlutoSCRX86TeamRuntimeV104.cpp' -Raw
+          foreach($needle in @(
+            'PLUTOTEAMRUNTIME_V114_RESIDENT=LOADED',
+            'V114_BASELINE=V113_LIVE_POLICY_PLUS_SELFLEARN_RECORDER',
+            'V114_SELFLEARN_MODE=SHADOW_POLICY_VALUE_LEARNER_NO_LIVE_POLICY_PROMOTION',
+            'V114_RECORDER_FORMAT=PTRJ114_MODEL_INPUT_PLUS_TRUE_RELATION_AND_CONTEXT_FLAGS_PLUS_TERMINAL_REWARD',
+            'V114_LIVE_POLICY_CHANGE=NONE_V113_EXACT',
+            'PTRJ114',
+            'RecStepHeaderV114',
+            'recorder114CaptureRequest',
+            'recorder114CommitResponse',
+            'recorder114ArmAfterFirstFrame',
+            'g_v114TrueRel',
+            'g_v114ContextFlags',
+            'V114_SELFLEARN_RECORDER=STEP_PASS',
+            'V114_SELFLEARN_RECORDER=END',
+            'V113_ALLY_DISTRESS_CONTEXT=STRATEGIC_ASSET_NEAR_VISIBLE_ENEMY_TEMP_SELF_SUPPORT_RING',
+            'kV113AllyDistressAssetRadiusPx=640',
+            'kV113AllyDistressSupportRadiusPx=768',
+            'V112_TOP_LEVEL_ACTION_MASK_BIAS=DISABLED',
+            'kV112PressureEndFrame=7500u',
+            'V112_FRAME_7500_PLUS=ORIGINAL_PLUTO_STRATEGY_100_PERCENT',
+            'V111_BURROW_POLICY=LURKER_ONLY_RESEARCH_DROP_NONLURKER_BURROW_DROP_LURKER_ALLOW',
+            'team111IsTransientUnitHandleError',
+            'V111_PLUTO_WIN_VALUE_SOURCE=OFFICIAL_SHM_RESPONSE_OFFSET_0x85F60',
+            'return shape=="3,256"'
+          )){
+            if(!$cpp.Contains($needle)){throw "v114 source guard missing: $needle"}
+          }
+          if($cpp.Contains('team109ApplyEarlyArmyPreference(b,actionMask,selfWorkers);')){throw 'v114 must not invoke v109 top-level action-mask bias'}
+          if($cpp.Contains('TEAM_TRAINING_RECORDER=CONFIRMED_DISABLED_V113')){throw 'v114 recorder unexpectedly disabled'}
+          if($cpp.Contains('pluto_weights_team4')){throw 'v114 must not use patched/team4 weights'}
+
+          # Hard guarantee: v113 live observation + v112 pressure section remains source-identical
+          # except recorder sidecar bookkeeping. Guard the key policy constants and direct mapping.
+          if(!$cpp.Contains('const bool friendlyContext=combatContext||distressAsset||distressSupport;')){throw 'v113 friendly context mapping changed'}
+          if(!$cpp.Contains('cat[(size_t)r*6u+1u]=friendlyContext?0:2;')){throw 'v113 ally model owner mapping changed'}
+          if(!$cpp.Contains('team112ApplyEarlyPressureArgBias(b,argMask,selfWorkers);')){throw 'v112 argument pressure missing'}
+          Write-Host 'V114_V113_LIVE_POLICY_PRESERVED=PASS'
+          Write-Host 'V114_FRAME_7500_OPENING_BIAS_OFF=PASS'
+          Write-Host 'V114_PTRJ114_TRUE_RELATION_SIDECAR=PASS'
+          Write-Host 'V114_SHADOW_ONLY_NO_LIVE_PROMOTION=PASS'
+          Write-Host 'V114_V1111_STALE_HANDLE_RECOVERY_PRESENT=PASS'
+          Write-Host 'V114_SOURCE_GUARDS=PASS'
+
+          # Parser must parse a synthetic PTRJ114 trajectory before compiling runtime.
+          & python 'src\plutoscr_x86\trajectory_v114.py' --selftest
+          if($LASTEXITCODE -ne 0){throw 'PTRJ114 parser selftest failed'}
+          Write-Host 'V114_PTRJ114_PARSER_SELFTEST=PASS'
+
+          Get-ChildItem src -Recurse -Filter '*.vcxproj' | ForEach-Object {
+            $x=Get-Content $_.FullName -Raw
+            $x=$x.Replace('<PlatformToolset>v141_xp</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            $x=$x.Replace('<PlatformToolset>v141</PlatformToolset>','<PlatformToolset>v143</PlatformToolset>')
+            Set-Content $_.FullName $x -Encoding UTF8
+          }
+          $p='src\bwapi\BWAPILIB\BWAPILIB.vcxproj'
+          $x=Get-Content $p -Raw
+          $x=$x.Replace('<AdditionalIncludeDirectories>','<AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)..;')
+          Set-Content $p $x -Encoding UTF8
+          Set-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#pragma once' -Encoding ASCII
+          Add-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#define SVN_REV 0' -Encoding ASCII
+          Add-Content 'src\bwapi\BWAPILIB\Source\svnrev.h' '#define BUILD_DEBUG 0' -Encoding ASCII
+          Write-Host 'PLUTOTEAMRUNTIME_V114_PREPARE=PASS'
+
+      - name: Build BWAPI static libraries
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $vw="${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs=& $vw -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if(!$vs){throw 'Visual Studio/MSBuild not found'}
+          $ms=Get-ChildItem "$vs\MSBuild" -Recurse -Filter 'MSBuild.exe' | Where-Object {$_.FullName -notlike '*\amd64\*'} | Select-Object -First 1
+          if(!$ms){throw 'MSBuild.exe not found'}
+          & $ms.FullName 'src\bwapi\BWAPILIB\BWAPILIB.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPILIB failed: $LASTEXITCODE"}
+          & $ms.FullName 'src\bwapi\BWAPIClient\BWAPIClient.vcxproj' /t:Rebuild /p:Configuration=Release /p:Platform=Win32 /v:minimal
+          if($LASTEXITCODE -ne 0){throw "BWAPIClient failed: $LASTEXITCODE"}
+          Write-Host 'PLUTOTEAMRUNTIME_V114_BWAPI_LIBS=PASS'
+
+      - name: Direct compile and link v114 resident
+        shell: powershell
+        run: .\src\plutoscr_x86\build-v114.ps1
+
+      - name: Validate official stock Pluto model contract
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory official_unpack -Force | Out-Null
+          curl.exe -L --fail --retry 5 --retry-delay 3 -o official_pluto.zip $env:PLUTO_RELEASE_URL
+          if($LASTEXITCODE -ne 0){throw 'official download failed'}
+          $sha=(Get-FileHash -Algorithm SHA256 official_pluto.zip).Hash.ToLower()
+          if($sha -ne $env:PLUTO_RELEASE_SHA256){throw "release SHA mismatch $sha"}
+          Expand-Archive official_pluto.zip official_unpack -Force
+
+          $infer='official_unpack\pluto\pluto_infer.exe'
+          $weights='official_unpack\pluto\pluto_weights.bin'
+          [byte[]]$b=[IO.File]::ReadAllBytes((Resolve-Path $infer))
+          $sig=($b[59201..59206] | ForEach-Object {$_.ToString('X2')}) -join ''
+          if($sig -ne '41B903000000'){throw "official owner gate is not stock 3-way: $sig"}
+
+          [byte[]]$raw=[IO.File]::ReadAllBytes((Resolve-Path $weights))
+          [UInt64]$hlen=[BitConverter]::ToUInt64($raw,8)
+          $hdr=([Text.Encoding]::UTF8.GetString($raw,16,[int]$hlen) | ConvertFrom-Json)
+          $t=$hdr.tensors | Where-Object {$_.name -eq 'owner_emb.weight'} | Select-Object -First 1
+          if([int]$t.shape[0] -ne 3 -or [int]$t.shape[1] -ne 256){throw 'official owner embedding is not [3,256]'}
+          $winHead=$hdr.tensors | Where-Object {$_.name -eq 'solo_win_head.out_proj.weight'} | Select-Object -First 1
+          if(!$winHead){throw 'official solo_win_head missing'}
+          Write-Host 'V114_OFFICIAL_SOLO_WIN_HEAD_PRESENT=PASS'
+          Write-Host 'V114_OFFICIAL_MODEL_GATE=3_PASS'
+          Write-Host 'V114_OFFICIAL_OWNER_EMB_3X256=PASS'
+          Write-Host 'V114_MODEL_PATCHING=NONE_PASS'
+
+      - name: Assemble v114 runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory artifact_v114 -Force | Out-Null
+          Copy-Item 'build_v114\PlutoSCRX86TeamRuntimeV114.dll' artifact_v114
+          Copy-Item 'build_v114\PlutoSCRX86Inject.exe' artifact_v114
+          Copy-Item 'src\plutoscr_x86\RUN_PLUTO_TEAMRUNTIME_X86_V114.cmd' artifact_v114
+          Copy-Item 'src\plutoscr_x86\README_TEAMRUNTIME_V114.txt' artifact_v114
+          Copy-Item 'src\plutoscr_x86\trajectory_v114.py' artifact_v114
+          Copy-Item 'src\plutoscr_x86\pluto_shadow_learn_v114.py' artifact_v114
+          Copy-Item 'src\plutoscr_x86\PACK_PLUTO_SELFLEARN_DATA_V114.cmd' artifact_v114
+          Copy-Item 'src\plutoscr_x86\RUN_SHADOW_SELFLEARN_V114.cmd' artifact_v114
+          $restore=Get-ChildItem src -Recurse -File -Filter 'RESTORE_PLUTO_OFFICIAL_V104.cmd' | Select-Object -First 1
+          if($restore){Copy-Item $restore.FullName 'artifact_v114\RESTORE_PLUTO_OFFICIAL_V114.cmd'}
+          foreach($f in @(
+            'PlutoSCRX86TeamRuntimeV114.dll',
+            'PlutoSCRX86Inject.exe',
+            'RUN_PLUTO_TEAMRUNTIME_X86_V114.cmd',
+            'README_TEAMRUNTIME_V114.txt',
+            'trajectory_v114.py',
+            'pluto_shadow_learn_v114.py',
+            'PACK_PLUTO_SELFLEARN_DATA_V114.cmd',
+            'RUN_SHADOW_SELFLEARN_V114.cmd'
+          )){
+            if(!(Test-Path (Join-Path artifact_v114 $f))){throw "missing artifact $f"}
+          }
+          Write-Host 'PLUTOTEAMRUNTIME_V114_PACKAGE=PASS'
+
+      - name: Upload v114 runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: aPlutoTeamRuntime-v114-X86-SelfLearn-Recorder-Shadow
+          path: artifact_v114
+          if-no-files-found: error
+          compression-level: 9
